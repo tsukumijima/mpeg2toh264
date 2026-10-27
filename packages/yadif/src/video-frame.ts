@@ -18,6 +18,8 @@ export interface FrameMetadata {
   timeOrigin: number;
   /** The frame for this notification, valid only until the callback returns. */
   frame?: VideoFrame;
+  /** 通知停止中に取得した、frame と同じ画像の RGBA 画素 */
+  pixels?: ImageData;
   /** Firefox counters supply identity and wall-clock cadence, not a frame PTS. */
   mozTiming?: { periodMs: number; discontinuity: boolean };
 }
@@ -101,8 +103,12 @@ export class VideoFrames {
   #capturedTimestamp: number | null = null;
   #captureCount = 0;
   #captureDeltas: number[] = [];
+  #captureInFlight = false;
+  #captureRevision = 0;
+  #pixelBuffers: Uint8ClampedArray<ArrayBuffer>[] = [];
   #pending: {
     frame: VideoFrame;
+    pixels?: ImageData;
     at: number;
     count: number;
   }[] = [];
@@ -244,17 +250,22 @@ export class VideoFrames {
           expectedDisplayTime: Math.max(captured.at, now),
           timeOrigin: performance.timeOrigin,
           frame,
+          pixels: captured.pixels,
         });
       } finally {
         // The receiver has cloned any frame sent to a Worker, so the original can now be closed.
         frame.close();
+        if (this.#callback !== null && captured.pixels?.data.byteLength)
+          this.#pixelBuffers.push(captured.pixels.data);
       }
     }
   }
 
   #clearCaptured(): void {
+    this.#captureRevision++;
     for (const captured of this.#pending) captured.frame.close();
     this.#pending = [];
+    this.#pixelBuffers = [];
   }
 
   #captureChanged = (event: Event): void => {
@@ -282,7 +293,12 @@ export class VideoFrames {
   };
 
   #armCapture(): void {
-    if (this.#captureTimer !== null || this.#callback === null) return;
+    if (
+      this.#captureTimer !== null ||
+      this.#callback === null ||
+      this.#captureInFlight
+    )
+      return;
     if (
       (this.#video.paused || this.#video.ended) &&
       this.#capturedTimestamp !== null
@@ -317,10 +333,10 @@ export class VideoFrames {
     this.#captureFrame();
   };
 
-  #captureFrame = (): void => {
+  #captureFrame = async (): Promise<void> => {
     this.#captureTimer = null;
     const video = this.#video;
-    if (this.#callback === null) return;
+    if (this.#callback === null || this.#captureInFlight) return;
     if (video.readyState < 2 || video.seeking) {
       this.#armCapture();
       return;
@@ -348,6 +364,33 @@ export class VideoFrames {
     if (frame.timestamp === this.#capturedTimestamp) {
       frame.close();
     } else {
+      let pixels: ImageData | undefined;
+      if (this.#fallback) {
+        // Chromium の VideoFrame を直接アップロードする経路は、GPU メモリが増え続けることがある
+        // 同じフレームの RGBA 画素を取得し、ブラウザの画像変換用リソースを描画ごとに作らせない
+        const revision = this.#captureRevision;
+        const width = frame.visibleRect?.width ?? frame.codedWidth;
+        const height = frame.visibleRect?.height ?? frame.codedHeight;
+        let buffer = this.#pixelBuffers.pop();
+        if (buffer?.byteLength !== width * height * 4)
+          buffer = new Uint8ClampedArray(width * height * 4);
+        this.#captureInFlight = true;
+        try {
+          await frame.copyTo(buffer, { format: "RGBA" });
+          pixels = new ImageData(buffer, width, height);
+        } catch (error) {
+          frame.close();
+          throw error;
+        } finally {
+          this.#captureInFlight = false;
+        }
+        // 画素取得中にシークや停止が入った場合、古い画像を新しい再生状態へ渡さない
+        if (revision !== this.#captureRevision || this.#callback === null) {
+          frame.close();
+          this.#armCapture();
+          return;
+        }
+      }
       let steps = 1;
       if (this.#capturedTimestamp !== null) {
         const delta = frame.timestamp - this.#capturedTimestamp;
@@ -372,7 +415,7 @@ export class VideoFrames {
           ? ((frame.timestamp / 1e6 - video.currentTime) * 1000) /
             video.playbackRate
           : 0);
-      this.#pending.push({ frame, at, count: this.#captureCount });
+      this.#pending.push({ frame, pixels, at, count: this.#captureCount });
       // After a long rendering stall, retain the newest frames and signal losses through the counter gap.
       while (this.#pending.length > 4) this.#pending.shift()!.frame.close();
     }

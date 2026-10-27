@@ -158,6 +158,7 @@ workerScope.onmessage = (event: MessageEvent<WorkerCommand>) => {
             performance.now(),
             command.metadata,
             command.frame,
+            command.pixels,
           );
         } finally {
           command.frame.close();

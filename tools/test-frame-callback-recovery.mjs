@@ -107,6 +107,43 @@ for (const rendering of ["main", "worker"]) {
   );
 }
 
+// 画素の読み出しを待っている最中に停止し、別の位置から再開しても古い画像を表示しない
+for (const rendering of ["main", "worker"]) {
+  const delayed = await run(bundles, {
+    vsyncs: 360,
+    rendering,
+    pixelCopyDelayMs: 300,
+    beforeVsync(vsync, control) {
+      stopFrameCallbacks(vsync, control);
+      if (vsync === 140) control.deinterlacer("__deinterlacer.stop()");
+      if (vsync >= 200) {
+        control.video.currentTime += 100;
+        control.video.pictureTime += 100;
+      }
+      if (vsync === 200) control.deinterlacer("__deinterlacer.start()");
+      if (vsync === 320) control.deinterlacer("__deinterlacer.destroy()");
+    },
+  });
+  const resumed = delayed.draws.filter(
+    (draw) => !draw.blit && draw.t > 2_000_000 + 200 * REFRESH_MS,
+  );
+  assert.ok(
+    resumed.length > 0,
+    `${rendering}: no pictures arrived after restart`,
+  );
+  assert.ok(
+    resumed.every((draw) => draw.picture?.mediaTime >= 100),
+    `${rendering}: an old pixel readback reached the new playback`,
+  );
+  assert.equal(
+    delayed.pageContext.VideoFrame.created,
+    delayed.pageContext.VideoFrame.closed,
+  );
+  console.log(
+    `ok - ${rendering} discards pixel readback from a stopped playback`,
+  );
+}
+
 // 登録だけが失われた場合は、再登録した通知も画像取得を補助し続ける
 let delivered = 0;
 let current = 0;

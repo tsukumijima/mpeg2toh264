@@ -421,6 +421,7 @@ interface ExternalRenderingHost extends AnimationFrames {
 interface PendingWorkerFrame {
   id: number;
   frame: VideoFrame;
+  pixels?: ImageData;
   now: number;
   metadata: FrameObservation;
   video: WorkerVideoState;
@@ -1434,6 +1435,7 @@ export class Deinterlacer extends EventTarget {
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
     captured?: VideoFrame,
+    pixels?: ImageData,
   ): void {
     let frame: VideoFrame;
     try {
@@ -1460,6 +1462,10 @@ export class Deinterlacer extends EventTarget {
     const pending: PendingWorkerFrame = {
       id: ++this.#workerFrameID,
       frame,
+      // 取得側の画素バッファは次の入力で再利用されるため、ACK 待ちの画像はここで所有する
+      pixels: pixels
+        ? new ImageData(pixels.data.slice(), pixels.width, pixels.height)
+        : undefined,
       now,
       metadata,
       video: this.#workerVideoState(),
@@ -1487,11 +1493,15 @@ export class Deinterlacer extends EventTarget {
       type: "frame",
       id: pending.id,
       frame: pending.frame,
+      pixels: pending.pixels,
       metadata: pending.metadata,
       video: pending.video,
     };
     try {
-      worker.postMessage(command, [pending.frame]);
+      worker.postMessage(command, [
+        pending.frame,
+        ...(pending.pixels ? [pending.pixels.data.buffer] : []),
+      ]);
     } catch (error) {
       this.#workerFrameInFlight = false;
       pending.frame.close();
@@ -1686,10 +1696,10 @@ export class Deinterlacer extends EventTarget {
     const at = this.#localTime(now, metadata.timeOrigin);
     this.#lastVideoFrameCallbackAt = at;
     // Pass frames only to their explicit transfer destination, excluding them from Worker metadata.
-    const { frame, ...observation } = metadata;
-    this.#frameSource = frame ?? this.#video;
+    const { frame, pixels, ...observation } = metadata;
+    this.#frameSource = pixels ?? frame ?? this.#video;
     try {
-      this.#ingestFrame(at, observation, frame);
+      this.#ingestFrame(at, observation, frame, pixels);
     } finally {
       this.#frameSource = this.#video;
     }
@@ -1704,9 +1714,10 @@ export class Deinterlacer extends EventTarget {
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
     frame?: VideoFrame,
+    pixels?: ImageData,
   ): void {
     if (this.#workerState === "active") {
-      this.#queueWorkerFrame(now, metadata, frame);
+      this.#queueWorkerFrame(now, metadata, frame, pixels);
       return;
     }
     if (this.#workerState !== "starting") this.#processFrame(now, metadata);
@@ -1721,8 +1732,9 @@ export class Deinterlacer extends EventTarget {
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
     frame: VideoFrame,
+    pixels?: ImageData,
   ): void {
-    this.#frameSource = frame;
+    this.#frameSource = pixels ?? frame;
     try {
       this.#processFrame(now, metadata);
     } finally {
