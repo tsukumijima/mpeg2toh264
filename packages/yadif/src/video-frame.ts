@@ -94,13 +94,18 @@ export class VideoFrames {
   #periodMs = 0;
   readonly #canCapture: boolean;
   #capture: boolean;
+  #fallback = false;
   #captureTimer: (() => void) | null = null;
   #captureDocument: Document | null = null;
   #nativeHandle: number | null = null;
   #capturedTimestamp: number | null = null;
   #captureCount = 0;
   #captureDeltas: number[] = [];
-  #pending: { frame: VideoFrame; at: number; count: number }[] = [];
+  #pending: {
+    frame: VideoFrame;
+    at: number;
+    count: number;
+  }[] = [];
 
   constructor(
     video: HTMLVideoElement,
@@ -140,7 +145,7 @@ export class VideoFrames {
     return this.#moz !== null && !this.#capture;
   }
 
-  /** Whether frequent capture is active, excluding fallback notifications based on video.currentTime. */
+  /** 実画像のタイムスタンプでフレームを取得しているか */
   get captureDriven(): boolean {
     return this.#capture;
   }
@@ -162,6 +167,23 @@ export class VideoFrames {
       : this.#video.requestVideoFrameCallback(this.#present);
   }
 
+  /** 通知停止後も、倍速再生と同じ画像取得経路で再生中のフレームを届ける */
+  recover(): void {
+    if (this.#callback === null || this.#capture || this.#moz) return;
+    if (this.#handle !== null)
+      this.#video.cancelVideoFrameCallback(this.#handle);
+    this.#handle = null;
+    if (this.#canCapture) {
+      // Chromium は PiP 終了後に rVFC の再登録でも通知が戻らないことがある
+      // 取得済みの時刻と枚数を引き継ぎ、画像と同じ VideoFrame の時刻で処理を続ける
+      this.#fallback = true;
+      this.#capture = true;
+      this.#armCapture();
+    } else {
+      this.#handle = this.#video.requestVideoFrameCallback(this.#present);
+    }
+  }
+
   cancel(): void {
     if (this.#handle !== null) {
       if (this.#moz) cancelAnimationFrame(this.#handle);
@@ -177,6 +199,8 @@ export class VideoFrames {
     this.#clearCaptured();
     this.#capturedTimestamp = null;
     this.#captureDeltas = [];
+    this.#fallback = false;
+    this.#capture = this.#canCapture && this.#video.playbackRate > 1;
     this.#reset();
   }
 
@@ -216,7 +240,8 @@ export class VideoFrames {
           height: frame.visibleRect?.height ?? frame.codedHeight,
           mediaTime: frame.timestamp / 1e6,
           presentedFrames: captured.count,
-          expectedDisplayTime: captured.at,
+          // 描画機会まで保持した画像は、この更新以降に表示する時刻として扱う
+          expectedDisplayTime: Math.max(captured.at, now),
           timeOrigin: performance.timeOrigin,
           frame,
         });
@@ -233,7 +258,9 @@ export class VideoFrames {
   }
 
   #captureChanged = (event: Event): void => {
-    const capture = this.#canCapture && this.#video.playbackRate > 1;
+    if (event.type === "emptied") this.#fallback = false;
+    const capture =
+      this.#canCapture && (this.#video.playbackRate > 1 || this.#fallback);
     if (capture !== this.#capture) {
       const callback = this.#callback;
       this.cancel();
@@ -241,14 +268,14 @@ export class VideoFrames {
       if (callback !== null) this.request(callback);
       return;
     }
-    if (!this.#capture) return;
-    if (event.type === "pause" || event.type === "ended")
-      this.flush(performance.now());
-    this.#clearCaptured();
     if (["seeking", "seeked", "emptied", "ratechange"].includes(event.type)) {
       this.#capturedTimestamp = null;
       this.#captureDeltas = [];
     }
+    if (!this.#capture) return;
+    if (event.type === "pause" || event.type === "ended")
+      this.flush(performance.now());
+    this.#clearCaptured();
     this.#captureTimer?.();
     this.#captureTimer = null;
     if (this.#callback !== null) this.#armCapture();
@@ -328,6 +355,9 @@ export class VideoFrames {
           // Count missing input from the median timestamp delta, independently of playback speed.
           this.#captureDeltas.push(delta);
           if (this.#captureDeltas.length > 7) this.#captureDeltas.shift();
+        }
+        if (delta > 0 && this.#captureDeltas.length > 0) {
+          // 通知停止中の長い空白も、停止前に測った入力周期で欠落枚数へ換算する
           const ordered = [...this.#captureDeltas].sort((a, b) => a - b);
           const period = ordered[Math.floor(ordered.length / 2)]!;
           steps = Math.max(1, Math.round(delta / period));
@@ -364,6 +394,17 @@ export class VideoFrames {
 
   /** Native acquisition: pass the report on, with the clock it was made on. */
   #present = (now: number, metadata: NativeFrameMetadata): void => {
+    const timestamp = Math.round(metadata.mediaTime * 1e6);
+    if (this.#capturedTimestamp !== null) {
+      const frames = metadata.presentedFrames - this.#captureCount;
+      const delta = timestamp - this.#capturedTimestamp;
+      if (frames > 0 && delta > 1000 && delta < 250000) {
+        this.#captureDeltas.push(delta / frames);
+        if (this.#captureDeltas.length > 7) this.#captureDeltas.shift();
+      }
+    }
+    this.#capturedTimestamp = timestamp;
+    this.#captureCount = metadata.presentedFrames;
     this.#deliver(now, {
       width: metadata.width,
       height: metadata.height,

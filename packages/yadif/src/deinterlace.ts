@@ -88,9 +88,6 @@ const DEFAULT_REFRESH_MS = 1000 / 60;
 /** 復号済み映像の進行を requestVideoFrameCallback() なしで待つ時間。 */
 const FRAME_CALLBACK_TIMEOUT_MS = 250;
 
-/** requestVideoFrameCallback() から周期を実測できるまで使う控えめな入力周期。 */
-const DEFAULT_FALLBACK_PERIOD_MS = 1000 / 30;
-
 const VERTEX_SHADER = `#version 300 es
 void main() {
   // One triangle over the whole viewport, from the vertex index alone. There
@@ -527,17 +524,10 @@ export class Deinterlacer extends EventTarget {
   #lastMediaTime = 0;
   /** presentedFrames at the last ingested frame; pairs with #lastMediaTime. */
   #lastPresentedFrames = 0;
-  #lastIngestedMediaTime = Number.NaN;
   /** A destination frame that arrived before the browser finished seeking. */
   #seekFrameReady = false;
-  /** 最終通知時刻。rVFC と Firefox カウンターのどちらの取得経路でも更新する。 */
+  /** 画像取得経路から最後にフレームを受け取った時刻 */
   #lastVideoFrameCallbackAt = 0;
-  /** どちらの取得経路からも参照するブラウザの復号フレーム数。 */
-  #lastObservedVideoFrames = 0;
-  /** animation loop の代替経路が最後にフレームを取り込んだ時刻。 */
-  #lastFallbackAt = 0;
-  /** 代替経路が requestVideoFrameCallback() を最後に予約し直した時刻。 */
-  #lastFrameCallbackRearmAt = 0;
   #running = false;
   /** Cancels work suspended inside a synchronous owner callback. */
   #playbackRevision = 0;
@@ -1227,10 +1217,6 @@ export class Deinterlacer extends EventTarget {
     // A new playback retries film detection if it was requested.
     if (!this.#recoverFilm()) return;
     this.#lastVideoFrameCallbackAt = performance.now();
-    this.#lastFallbackAt = this.#lastVideoFrameCallbackAt;
-    this.#lastIngestedMediaTime = Number.NaN;
-    this.#lastObservedVideoFrames =
-      this.#video.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
     this.#mount();
     this.#startFrameWatchdog();
     if (this.#ensureWorker()) {
@@ -1692,10 +1678,6 @@ export class Deinterlacer extends EventTarget {
     // origin so that a Worker renderer can convert it in turn.
     const at = this.#localTime(now, metadata.timeOrigin);
     this.#lastVideoFrameCallbackAt = at;
-    this.#lastObservedVideoFrames = Math.max(
-      this.#lastObservedVideoFrames,
-      this.#video.getVideoPlaybackQuality?.().totalVideoFrames ?? 0,
-    );
     // Pass frames only to their explicit transfer destination, excluding them from Worker metadata.
     const { frame, ...observation } = metadata;
     this.#frameSource = frame ?? this.#video;
@@ -1716,7 +1698,6 @@ export class Deinterlacer extends EventTarget {
     metadata: FrameObservation,
     frame?: VideoFrame,
   ): void {
-    this.#lastIngestedMediaTime = metadata.mediaTime;
     if (this.#workerState === "active") {
       this.#queueWorkerFrame(now, metadata, frame);
       return;
@@ -2424,14 +2405,11 @@ export class Deinterlacer extends EventTarget {
       this.#watchdogRequest = this.#armAnimationFrame(this.#onFrameWatchdog);
   };
 
-  /** requestVideoFrameCallback() が来ない間も requestAnimationFrame() から復号フレームを取り込む。 */
+  /** 通知停止を検出したら、画像取得を VideoFrames の代替経路へ切り替える */
   #recoverFrameCallback(now: DOMHighResTimeStamp): void {
     if (this.#externalHost) return;
     if (this.#videoFrames.captureDriven) return;
-    // Firefox カウンター経路では VideoFrames が新規画像の判断を所有し、
-    // painted が進まない画像の取込みを意図的に抑止する。watchdog が復号
-    // カウンターから取込むと同一画像の重複登録になるため除外する。ただし
-    // 一度も配信がない間 (カウンター無効などで凍結) は従来の救済を残す。
+    // Firefox では描画済み枚数を VideoFrames 自身が監視し、その変化を画像の到着として扱う
     if (this.#videoFrames.mozDriven && this.#videoFrames.hasDelivered) return;
     if (
       now - this.#lastVideoFrameCallbackAt < FRAME_CALLBACK_TIMEOUT_MS ||
@@ -2441,49 +2419,8 @@ export class Deinterlacer extends EventTarget {
     )
       return;
 
-    const mediaTime = this.#video.currentTime;
-    const totalVideoFrames =
-      this.#video.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
-    const fallbackPeriod =
-      this.#periodMs >= MIN_PERIOD_MS
-        ? this.#periodMs
-        : DEFAULT_FALLBACK_PERIOD_MS;
-    // 復号フレーム数を提供するブラウザではその増加だけから新しい画像を識別する。
-    // カウンターがゼロのブラウザでは時刻差で間隔を空け、requestAnimationFrame() の周期で同じ画像を履歴へ重複登録せずに代替経路を維持する
-    // currentTime は画像単位ではなく描画のたびに進むため、カウンターがあるのに時刻の変化でも取り込むと同じ画像を二度取り込む。
-    // その2回の間隔が半フレームの周期として測られ、以後は毎回の描画が新しいフレーム扱いになって、フィルム再構成が 24fps ではなく 48fps で出力し続ける
-    const newPicture =
-      totalVideoFrames > 0
-        ? totalVideoFrames > this.#lastObservedVideoFrames
-        : mediaTime !== this.#lastIngestedMediaTime &&
-          now - this.#lastFallbackAt >= fallbackPeriod * 0.75;
-    if (!newPicture) return;
-
-    // requestVideoFrameCallback() は自分のコールバックの中で予約し直すため、コールバックが例外で抜けたり、
-    // ブラウザが予約を捨てたりすると、以後は代替経路だけが動き続ける。通知が止まったまま映像が進んでいる間は予約をやり直し、戻れば通常の経路へ復帰させる
-    if (now - this.#lastFrameCallbackRearmAt >= FRAME_CALLBACK_TIMEOUT_MS) {
-      this.#lastFrameCallbackRearmAt = now;
-      this.#videoFrames.cancel();
-      this.#request();
-    }
-
-    this.#lastObservedVideoFrames = Math.max(
-      this.#lastObservedVideoFrames,
-      totalVideoFrames,
-    );
-    this.#lastFallbackAt = now;
-    this.#ingestFrame(now, {
-      mediaTime,
-      presentedFrames: Math.max(this.#lastPresented + 1, totalVideoFrames),
-      // The fallback has no compositor timestamp. The animation frame that
-      // found the picture is the best stand-in, and it was taken on this
-      // realm's clock -- the same one #displayTime converts towards, so it
-      // passes through unchanged.
-      expectedDisplayTime: now,
-      timeOrigin: performance.timeOrigin,
-      width: this.#video.videoWidth,
-      height: this.#video.videoHeight,
-    });
+    this.#request();
+    this.#videoFrames.recover();
   }
 
   /**
@@ -3006,7 +2943,6 @@ export class Deinterlacer extends EventTarget {
   }
 
   #onEmptied = (): void => {
-    this.#lastIngestedMediaTime = Number.NaN;
     if (this.#postWorkerEvent("emptied")) {
       this.#closePendingWorkerFrame();
       this.#setVisible(false);

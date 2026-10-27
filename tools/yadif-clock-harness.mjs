@@ -140,7 +140,7 @@ class WebGL2RenderingContext {
   texImage2D(target, level, format, width, height, source) {
     if (this.#texture) Object.assign(this.#texture, { format, width, height });
     if (source && this.#texture)
-      this.#texture.mediaTime = source.currentTime ?? source.timestamp / 1e6;
+      this.#texture.mediaTime = source.pictureTime ?? source.currentTime ?? source.timestamp / 1e6;
   }
   texSubImage2D() {}
   deleteTexture() {}
@@ -217,10 +217,14 @@ class VideoFrame {
   static created = 0;
   static closed = 0;
   constructor(source, init) {
-    this.timestamp = (init && init.timestamp) || 0;
+    this.timestamp = init?.timestamp ?? source.timestamp ??
+      Math.round((source.pictureTime ?? source.currentTime ?? 0) * 1e6);
+    this.codedWidth = source.codedWidth ?? source.videoWidth ?? 0;
+    this.codedHeight = source.codedHeight ?? source.videoHeight ?? 0;
     this.closes = 0;
     this.id = ++VideoFrame.created;
   }
+  clone() { return new VideoFrame(this); }
   close() {
     this.closes++;
     VideoFrame.closed++;
@@ -239,13 +243,19 @@ function requestAnimationFrame(callback) {
 function cancelAnimationFrame(handle) {
   __host.cancelAnimationFrame(__realm, handle);
 }
+function setTimeout(callback, delay) {
+  return __host.setTimeout(__realm, callback, delay);
+}
+function clearTimeout(handle) {
+  __host.clearTimeout(handle);
+}
 function createImageBitmap() {
   return Promise.resolve({ __transferable: true, close() {} });
 }
 
 Object.assign(globalThis, {
   WebGL2RenderingContext, OffscreenCanvas, VideoFrame, performance,
-  requestAnimationFrame, cancelAnimationFrame, createImageBitmap,
+  requestAnimationFrame, cancelAnimationFrame, setTimeout, clearTimeout, createImageBitmap,
 });
 `;
 
@@ -354,6 +364,8 @@ class FakeWindow {
   cancelAnimationFrame(handle) {
     __host.cancelAnimationFrame(this.name, handle);
   }
+  setTimeout(callback, delay) { return __host.setTimeout(this.name, callback, delay); }
+  clearTimeout(handle) { __host.clearTimeout(handle); }
 }
 
 // The realm this module was loaded in: the opener. Its animation frames are
@@ -541,6 +553,7 @@ export async function run(bundles, options = {}) {
   /** Every registration and cancellation, with the window it was made on. */
   const requests = [];
   const cancels = [];
+  const timers = new Map();
   let observer = null;
 
   const host = {
@@ -580,6 +593,18 @@ export async function run(bundles, options = {}) {
         known: queueFor(realm).pending.has(handle),
       });
       queueFor(realm).pending.delete(handle);
+    },
+    setTimeout(realm, callback, delay) {
+      const handle = ++nextHandle;
+      timers.set(handle, callback);
+      clock.at(clock.now + delay, () => {
+        if (!timers.delete(handle) || queueFor(realm).suspended) return;
+        callback();
+      });
+      return handle;
+    },
+    clearTimeout(handle) {
+      timers.delete(handle);
     },
     createWorker(worker) {
       pageWorker = worker;
@@ -774,6 +799,7 @@ export async function run(bundles, options = {}) {
       }
       const now = clock.now - acquisitionOrigin;
       video.currentTime = (index * FRAME_PERIOD_MS) / 1000;
+      video.pictureTime = video.currentTime;
       video.totalVideoFrames = index + 1;
       const expected = now + REFRESH_MS;
       video.deliverFrame(now, {

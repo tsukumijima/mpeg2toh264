@@ -36,6 +36,7 @@ function stopFrameCallbacks(vsync, control) {
   if (vsync < STOP) return;
   if (vsync === STOP) control.frames(false);
   control.video.currentTime = (vsync * REFRESH_MS) / 1000;
+  control.video.pictureTime = (Math.floor(vsync / 2) * 2 * REFRESH_MS) / 1000;
   control.video.totalVideoFrames = Math.floor(vsync / 2) + 1;
 }
 
@@ -68,9 +69,45 @@ console.log(
   `ok - the fallback takes each picture in once (${perFrame.toFixed(2)} fields per frame)`,
 );
 
-// A registration the browser drops leaves the frame callback silent while the
-// element goes on presenting frames. The fallback asks again, and the frames
-// come back through the callback rather than staying on the fallback.
+// 実画像の切り替わりとフレームカウンターの更新をずらし、同じ画像の再登録を検出する
+for (const rendering of ["main", "worker"]) {
+  const skewed = await run(bundles, {
+    vsyncs: VSYNCS,
+    rendering,
+    beforeVsync(vsync, control) {
+      stopFrameCallbacks(vsync, control);
+      if (vsync >= STOP) {
+        const early = Math.floor(vsync / 8) % 2;
+        control.video.totalVideoFrames = Math.floor((vsync + early) / 2) + 1;
+      }
+    },
+  });
+  const from = 2_000_000 + COUNT_FROM * REFRESH_MS;
+  const fields = new Map();
+  for (const draw of skewed.draws) {
+    if (draw.toCanvas || draw.t < from) continue;
+    const time = draw.picture?.mediaTime;
+    fields.set(time, (fields.get(time) ?? 0) + 1);
+  }
+  assert.ok(fields.size > (VSYNCS - COUNT_FROM) / 2 - 3);
+  assert.equal(
+    Math.max(...fields.values()),
+    2,
+    `${rendering}: the same source picture was filtered more than once`,
+  );
+  assert.equal(skewed.failures.length, 0, skewed.failures[0]?.message);
+  skewed.control.deinterlacer("__deinterlacer.destroy()");
+  assert.equal(
+    skewed.pageContext.VideoFrame.created,
+    skewed.pageContext.VideoFrame.closed,
+    `${rendering}: captured frames remained open after destruction`,
+  );
+  console.log(
+    `ok - ${rendering} fallback follows picture timestamps despite counter skew`,
+  );
+}
+
+// 登録だけが失われた場合は、再登録した通知も画像取得を補助し続ける
 let delivered = 0;
 let current = 0;
 await run(bundles, {

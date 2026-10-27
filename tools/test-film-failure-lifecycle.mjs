@@ -55,6 +55,7 @@ for (const listener of ["event", "callback"])
           control = current;
           if (trigger === "watchdog" && n > 65 && n % 2 === 0) {
             current.video.currentTime += 1 / 30;
+            current.video.pictureTime = current.video.currentTime;
             current.video.totalVideoFrames++;
           }
           if (n === 0 && listener === "event") {
