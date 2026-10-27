@@ -18,6 +18,8 @@ export interface FrameMetadata {
     timeOrigin: number;
     /** The frame for this notification, valid only until the callback returns. */
     frame?: VideoFrame;
+    /** 通知停止中に取得した、frame と同じ画像の RGBA 画素 */
+    pixels?: ImageData;
     /** Firefox counters supply identity and wall-clock cadence, not a frame PTS. */
     mozTiming?: {
         periodMs: number;
@@ -40,11 +42,13 @@ export declare class VideoFrames {
     constructor(video: HTMLVideoElement, takeFrame?: () => VideoFrame | null | undefined);
     /** Whether acquisition runs off the Firefox counters. */
     get mozDriven(): boolean;
-    /** Whether frequent capture is active, excluding fallback notifications based on video.currentTime. */
+    /** 実画像のタイムスタンプでフレームを取得しているか */
     get captureDriven(): boolean;
     /** Whether any frame has been delivered yet (counters proven live). */
     get hasDelivered(): boolean;
     request(callback: FrameCallback): void;
+    /** 通知停止後も、倍速再生と同じ画像取得経路で再生中のフレームを届ける */
+    recover(): void;
     cancel(): void;
     destroy(): void;
     /** Deliver pending input on the rendering window's refresh, before drawing. */
