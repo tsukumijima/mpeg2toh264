@@ -7,6 +7,11 @@
 - `packages/player` is MIT and must not import `packages/yadif`, which is LGPL-2.1-or-later. The demo injects yadif through `PlayerDeinterlacer`.
 - Keep straightforward scheduling decisions at their call sites. Do not extract trivial helpers solely to unit-test them or add tests that only restate assignments and array clearing; a regression test must exercise an observable player or deinterlacer path that could actually fail.
 
+## Comments
+
+- Write all code comments and documentation comments in English.
+- Match the original author's style in the surrounding code, including sentence-ending periods and the choice of `//`, `/* ... */`, or `/** ... */`. In the TypeScript sources, declaration documentation uses `/** ... */`, implementation notes use `//`, and complete sentences end with a period.
+
 ## Codec invariants
 
 - The normal luma path is coefficient-domain: do not introduce pixel reconstruction, motion compensation, or a decoded-picture pixel buffer outside the random-access intra picture without documenting why the architecture changed.

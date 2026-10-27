@@ -1194,7 +1194,7 @@ if (!supportsDeinterlace()) {
   option("managed-worker").disabled =
     !hasManaged || !supportsWorkerMediaSource(true);
   option("managed-main").disabled = !hasManaged;
-  // 自動 is the browser's own answer, so it says what the answer turned out
+  // The automatic option is the browser's own answer, so it says what it turned out
   // to be rather than leaving it to be guessed at.
   const auto = option("auto");
   const implementation = onlyManaged ? "ManagedMediaSource" : "MediaSource";

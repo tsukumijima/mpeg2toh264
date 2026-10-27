@@ -18,7 +18,7 @@ export interface FrameMetadata {
   timeOrigin: number;
   /** The frame for this notification, valid only until the callback returns. */
   frame?: VideoFrame;
-  /** 通知停止中に取得した、frame と同じ画像の RGBA 画素 */
+  /** RGBA pixels from the same frame, captured while native callbacks are stalled. */
   pixels?: ImageData;
   /** Firefox counters supply identity and wall-clock cadence, not a frame PTS. */
   mozTiming?: { periodMs: number; discontinuity: boolean };
@@ -151,7 +151,7 @@ export class VideoFrames {
     return this.#moz !== null && !this.#capture;
   }
 
-  /** 実画像のタイムスタンプでフレームを取得しているか */
+  /** Whether acquisition uses the captured pictures' own timestamps. */
   get captureDriven(): boolean {
     return this.#capture;
   }
@@ -173,15 +173,16 @@ export class VideoFrames {
       : this.#video.requestVideoFrameCallback(this.#present);
   }
 
-  /** 通知停止後も、倍速再生と同じ画像取得経路で再生中のフレームを届ける */
+  /** Recover stalled callbacks through the capture path used for faster playback. */
   recover(): void {
     if (this.#callback === null || this.#capture || this.#moz) return;
     if (this.#handle !== null)
       this.#video.cancelVideoFrameCallback(this.#handle);
     this.#handle = null;
     if (this.#canCapture) {
-      // Chromium は PiP 終了後に rVFC の再登録でも通知が戻らないことがある
-      // 取得済みの時刻と枚数を引き継ぎ、画像と同じ VideoFrame の時刻で処理を続ける
+      // Re-registering rVFC may not restore notifications after PiP closes in
+      // Chromium. Carry the last timestamp and count into capture, where each
+      // picture is identified by its own VideoFrame timestamp.
       this.#fallback = true;
       this.#capture = true;
       this.#armCapture();
@@ -246,7 +247,7 @@ export class VideoFrames {
           height: frame.visibleRect?.height ?? frame.codedHeight,
           mediaTime: frame.timestamp / 1e6,
           presentedFrames: captured.count,
-          // 描画機会まで保持した画像は、この更新以降に表示する時刻として扱う
+          // A picture held until this refresh is scheduled no earlier than now.
           expectedDisplayTime: Math.max(captured.at, now),
           timeOrigin: performance.timeOrigin,
           frame,
@@ -366,8 +367,9 @@ export class VideoFrames {
     } else {
       let pixels: ImageData | undefined;
       if (this.#fallback) {
-        // Chromium の VideoFrame を直接アップロードする経路は、GPU メモリが増え続けることがある
-        // 同じフレームの RGBA 画素を取得し、ブラウザの画像変換用リソースを描画ごとに作らせない
+        // Uploading VideoFrame directly can keep growing GPU memory in
+        // Chromium. Copy RGBA pixels from the same frame so each upload uses
+        // plain pixel data instead of the browser's image conversion path.
         const revision = this.#captureRevision;
         const width = frame.visibleRect?.width ?? frame.codedWidth;
         const height = frame.visibleRect?.height ?? frame.codedHeight;
@@ -384,7 +386,8 @@ export class VideoFrames {
         } finally {
           this.#captureInFlight = false;
         }
-        // 画素取得中にシークや停止が入った場合、古い画像を新しい再生状態へ渡さない
+        // A seek or stop during readback makes this picture stale. Release it
+        // and resume acquisition against the current playback state.
         if (revision !== this.#captureRevision || this.#callback === null) {
           frame.close();
           this.#armCapture();
@@ -400,7 +403,8 @@ export class VideoFrames {
           if (this.#captureDeltas.length > 7) this.#captureDeltas.shift();
         }
         if (delta > 0 && this.#captureDeltas.length > 0) {
-          // 通知停止中の長い空白も、停止前に測った入力周期で欠落枚数へ換算する
+          // Use the previously measured input period to count missing frames
+          // across a long gap while callbacks are stalled.
           const ordered = [...this.#captureDeltas].sort((a, b) => a - b);
           const period = ordered[Math.floor(ordered.length / 2)]!;
           steps = Math.max(1, Math.round(delta / period));

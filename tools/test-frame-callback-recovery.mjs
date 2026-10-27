@@ -69,7 +69,8 @@ console.log(
   `ok - the fallback takes each picture in once (${perFrame.toFixed(2)} fields per frame)`,
 );
 
-// 実画像の切り替わりとフレームカウンターの更新をずらし、同じ画像の再登録を検出する
+// Offset counter updates from picture changes to catch repeated ingestion
+// of the same picture.
 for (const rendering of ["main", "worker"]) {
   const skewed = await run(bundles, {
     vsyncs: VSYNCS,
@@ -107,7 +108,8 @@ for (const rendering of ["main", "worker"]) {
   );
 }
 
-// 画素の読み出しを待っている最中に停止し、別の位置から再開しても古い画像を表示しない
+// Stop during pixel readback and resume at another position. Only pictures
+// from the resumed playback should be displayed.
 for (const rendering of ["main", "worker"]) {
   const delayed = await run(bundles, {
     vsyncs: 360,
@@ -144,7 +146,8 @@ for (const rendering of ["main", "worker"]) {
   );
 }
 
-// 登録だけが失われた場合は、再登録した通知も画像取得を補助し続ける
+// When only the registration is lost, re-registered callbacks continue to
+// assist frame acquisition.
 let delivered = 0;
 let current = 0;
 await run(bundles, {

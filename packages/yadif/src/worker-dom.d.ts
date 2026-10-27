@@ -1,8 +1,10 @@
 /**
- * 共通描画エンジンを Worker で型検査するために必要なページ側の型。
+ * Page-side types needed to check the shared rendering engine in a Worker.
  *
- * 実行時の Worker は ExternalRenderingHost と WorkerVideo を使うため、DOM を操作する分岐には入りません。
- * ページ用 DOM と Worker 用 DOM の標準型を同じプログラムへ読み込まず、共有ソースが参照する境界だけをここで宣言します。
+ * At runtime the Worker uses ExternalRenderingHost and WorkerVideo, so it
+ * never enters the branches that manipulate the DOM. Declare only what the
+ * shared source refers to, keeping the standard page and Worker libraries
+ * in separate TypeScript programs.
  */
 
 interface TimeRanges {

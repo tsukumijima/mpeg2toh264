@@ -304,7 +304,8 @@ for (const rendering of ["main", "worker"]) {
           control.video.totalVideoFrames = Math.floor(vsync / 2) + 1;
         }
         if (vsync === 120) {
-          // PiP を閉じたときの順序を再現し、サイズ変更と rVFC からの救済を除く
+          // Reproduce the PiP close order with neither a resize nor a frame
+          // callback available to discover the move.
           control.suspend("pipA");
           control.views.get("pipA").closed = true;
           control.resume("page");

@@ -14,7 +14,7 @@ import type {
 
 const workerScope = self as unknown as DedicatedWorkerGlobalScope;
 
-/** 共通描画エンジンが読む media element の状態だけを再現する。 */
+/** The media element state read by the shared rendering engine. */
 class WorkerVideo extends EventTarget {
   currentTime = 0;
   playbackRate = 1;
@@ -31,7 +31,7 @@ class WorkerVideo extends EventTarget {
   offsetTop = 0;
   #buffered: Array<{ start: number; end: number }> = [];
 
-  /** フレームや media event を処理する前に、ページ側の状態を反映する。 */
+  /** Apply the page's state before processing a frame or media event. */
   update(state: WorkerVideoState): void {
     this.currentTime = state.currentTime;
     this.playbackRate = state.playbackRate;
@@ -82,17 +82,17 @@ let video: WorkerVideo | null = null;
 let deinterlacer: Deinterlacer | null = null;
 let destroying = false;
 
-/** Worker が所有する requestAnimationFrame() へ共通描画エンジンの表示ループを接続する。 */
+/** Run the shared engine's presentation loop on the Worker's animation frames. */
 function requestWorkerAnimationFrame(callback: FrameRequestCallback): number {
   return workerScope.requestAnimationFrame(callback);
 }
 
-/** Worker 側で予約した表示機会を取り消す。 */
+/** Cancel an animation frame requested from the Worker. */
 function cancelWorkerAnimationFrame(handle: number): void {
   workerScope.cancelAnimationFrame(handle);
 }
 
-/** このモジュールが所有する Worker 境界を通して通知を転送する。 */
+/** Send a notification through this module's Worker boundary. */
 function post(
   notification: WorkerNotification,
   transfer: Transferable[] = [],
@@ -100,7 +100,7 @@ function post(
   workerScope.postMessage(notification, transfer);
 }
 
-/** 初期化後にも変更できる設定を公開 setter 経由で反映する。 */
+/** Apply mutable settings through the public setters after initialization. */
 function applySettings(
   renderer: Deinterlacer,
   options: WorkerRenderingOptions,
@@ -150,10 +150,10 @@ workerScope.onmessage = (event: MessageEvent<WorkerCommand>) => {
       case "frame":
         video.update(command.video);
         try {
-          // 渡す now は Worker の時計で測った取込み時刻 (キューの現在時刻)。
-          // 表示予定時刻は取得側の時計のままで、同梱の timeOrigin との差から
-          // 描画側で変換する。転送の遅れを表示予定へ持ち込まないために、
-          // ここで performance.now() へ置き換えてはならない。
+          // `now` is the ingestion time on the Worker's clock, used as the
+          // queue's current time. The display time stays on the acquisition
+          // clock and is translated by the renderer using timeOrigin.
+          // Keeping it intact keeps transfer latency out of the schedule.
           deinterlacer.ingestExternalFrame(
             performance.now(),
             command.metadata,
@@ -184,7 +184,8 @@ workerScope.onmessage = (event: MessageEvent<WorkerCommand>) => {
       case "capture":
         video.videoWidth = command.width;
         video.videoHeight = command.height;
-        // seek 直後など再描画できる画像がない期間は null を返し、ページ側の実 video を capture する。
+        // Just after a seek there may be no picture to redraw. Return null
+        // so the page captures the actual video element instead.
         void deinterlacer
           .capture()
           .then((image) =>

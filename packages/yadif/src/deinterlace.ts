@@ -53,7 +53,7 @@ import type {
 
 let bundledWorkerURL: string | URL | null = null;
 
-/** @internal Worker として出力したファイルの URL を公開エントリから受け取る。 */
+/** @internal Receive the bundled Worker's URL from the public entry point. */
 export function setBundledWorkerURL(url: string | URL): void {
   bundledWorkerURL = url;
 }
@@ -85,7 +85,7 @@ const PERIOD_SMOOTHING = 0.25;
 /** The screen's refresh interval until animation frames have said otherwise. */
 const DEFAULT_REFRESH_MS = 1000 / 60;
 
-/** 復号済み映像の進行を requestVideoFrameCallback() なしで待つ時間。 */
+/** How long to wait for requestVideoFrameCallback() before trying recovery. */
 const FRAME_CALLBACK_TIMEOUT_MS = 250;
 
 const VERTEX_SHADER = `#version 300 es
@@ -178,18 +178,19 @@ interface Ready {
 
 type Cadence = "frame" | "field" | "film";
 
-/** 表示済み映像を1フレーム取り込むために使う callback metadata。 */
+/** Callback metadata describing one presented frame to take in. */
 interface FrameObservation {
   mediaTime: number;
   presentedFrames: number;
   /**
-   * requestVideoFrameCallback() が報告した表示予定時刻。予定スケジュールの
-   * 起点に使う (otya)。取得側と描画側で performance の時刻原点は一致しない
-   * ため、必ず `timeOrigin` とともに扱い、描画側の時計へ変換してから使う。
-   * Firefox カウンター経路では VideoFrames がポーリング時刻を入れる。
+   * The display time reported by requestVideoFrameCallback(), which anchors
+   * the presentation schedule (otya). Acquisition and rendering may use
+   * different performance clocks, so carry `timeOrigin` with it and convert
+   * to the renderer's clock before scheduling. On the Firefox counter path,
+   * VideoFrames supplies the time of the poll instead.
    */
   expectedDisplayTime: number;
-  /** `expectedDisplayTime` を測った realm の performance.timeOrigin。 */
+  /** The performance.timeOrigin against which `expectedDisplayTime` was measured. */
   timeOrigin: number;
   width: number;
   height: number;
@@ -250,7 +251,7 @@ export interface DeinterlaceStats {
    * (otya)
    */
   resynced: number;
-  /** 表示機会を過ぎたか、表示時計と予定時刻が食い違ったために描画されなかったフィールド数。 */
+  /** Fields skipped because their display time passed or disagreed with the presentation clock. */
   late: number;
   /**
    * Times the presentation queue was reset because its scheduled lead exceeded
@@ -259,7 +260,11 @@ export interface DeinterlaceStats {
   queueResetted: number;
   /** Frames presented per second over the last report. */
   fps: number;
-  /** 直近区間で入力1枚のアップロード、フィルター、表示に費やした描画スレッド上の平均時間。GPU の実行時間と Worker 描画時のメインスレッド占有時間は含まない。 */
+  /**
+   * Average rendering-thread time per input frame spent uploading, filtering
+   * and presenting during the last report. Excludes GPU execution time and,
+   * when rendering in a Worker, time spent on the main thread.
+   */
   frameMs: number;
   /**
    * The largest number of pictures queued during the last reporting interval,
@@ -291,7 +296,7 @@ export interface DeinterlaceStats {
 export interface DeinterlacerOptions {
   /** Rendering target, defaulting to `main`; `auto` prefers the bundled Worker and falls back to the main thread if initialization fails. */
   rendering?: "auto" | "worker" | "main";
-  /** module Worker の URL。省略時はパッケージへ同梱したファイルを使う。 */
+  /** The module Worker's URL, defaulting to the file bundled with the package. */
   workerUrl?: string | URL;
   /**
    * Whether to show a picture for every field rather than for every frame.
@@ -410,14 +415,14 @@ interface AnimationRequest {
   handle: number;
 }
 
-/** Worker の入口だけが、同じクラスから描画エンジンを構築するために渡す内部接続。 */
+/** Internal host supplied by the Worker entry point to build the same rendering engine. */
 interface ExternalRenderingHost extends AnimationFrames {
   canvas: OffscreenCanvas;
   onFailure(message: string): void;
   onVisibility(visible: boolean): void;
 }
 
-/** ACK を待つ間にページ側が所有する最新フレームと、その観測状態。 */
+/** The newest frame and its observed state, owned by the page while awaiting an acknowledgement. */
 interface PendingWorkerFrame {
   id: number;
   frame: VideoFrame;
@@ -477,7 +482,7 @@ export class Deinterlacer extends EventTarget {
   /** The requestAnimationFrame() loop that puts them up, which is all that draws on the canvas. */
   #loopRequest: AnimationRequest | null = null;
   #lastLoopAt = 0;
-  /** ページ側で frame callback の停止を監視する requestAnimationFrame()。 */
+  /** The page's requestAnimationFrame() that watches for stalled frame callbacks. */
   #watchdogRequest: AnimationRequest | null = null;
   /** The document the owner-change listener is on, if any. */
   #ownerDocument: Document | null = null;
@@ -528,7 +533,7 @@ export class Deinterlacer extends EventTarget {
   #lastPresentedFrames = 0;
   /** A destination frame that arrived before the browser finished seeking. */
   #seekFrameReady = false;
-  /** 画像取得経路から最後にフレームを受け取った時刻 */
+  /** When the last frame arrived from the acquisition path. */
   #lastVideoFrameCallbackAt = 0;
   #running = false;
   /** Cancels work suspended inside a synchronous owner callback. */
@@ -606,7 +611,7 @@ export class Deinterlacer extends EventTarget {
   #workerFilmError: string | null = null;
   #workerFilmFailure = 0;
   constructor(video: HTMLVideoElement, options?: DeinterlacerOptions);
-  /** @internal Worker の描画エンジンを構築する場合だけ使う。 */
+  /** @internal Used only to construct the rendering engine inside a Worker. */
   constructor(
     video: HTMLVideoElement,
     options: DeinterlacerOptions,
@@ -683,8 +688,9 @@ export class Deinterlacer extends EventTarget {
     this.#resizes = externalHost
       ? null
       : new ResizeObserver(() => this.#layout());
-    // PiP の非表示通知は DOM を戻す前に届き、同じサイズへの移動では resize も発生しない
-    // DOM の移動を観測し、描画コールバックが停止したウインドウからも予約先を切り替える
+    // PiP reports becoming hidden before the DOM moves back, and a move at
+    // the same size produces no resize. Observe adoption directly so pending
+    // requests follow the canvas even after the old window stops serving them.
     this.#ownerChanges = externalHost
       ? null
       : new MutationObserver(() => {
@@ -715,7 +721,7 @@ export class Deinterlacer extends EventTarget {
     return this.#running && (this.#scan?.interlaced ?? true);
   }
 
-  /** 現在 media element の上に配置している HTML canvas。 */
+  /** The HTML canvas currently placed over the media element. */
   get canvas(): HTMLCanvasElement {
     return this.#displayCanvas;
   }
@@ -725,7 +731,7 @@ export class Deinterlacer extends EventTarget {
     return this.#scan?.topFieldFirst !== false;
   }
 
-  /** どの描画先にも同じ公開オプションを渡す。 */
+  /** The same public filter options for either rendering target. */
   #workerRenderingOptions(): WorkerRenderingOptions {
     return {
       doubleRate: this.#doubleRate,
@@ -915,7 +921,7 @@ export class Deinterlacer extends EventTarget {
     }
   }
 
-  /** Worker と canvas を再構築せずに変更可能なフィルター設定を反映する。 */
+  /** Apply mutable filter settings to the existing Worker and canvas. */
   #postWorkerSettings(retryFilm?: "film"): void {
     this.#worker?.postMessage({
       type: "settings",
@@ -947,7 +953,7 @@ export class Deinterlacer extends EventTarget {
     else this.stop();
   }
 
-  /** 転送に必要な API がそろっている場合だけ同梱 Worker を起動する。 */
+  /** Start the bundled Worker when the required transfer APIs are available. */
   #ensureWorker(): boolean {
     if (this.#externalHost || this.#rendering === "main") return false;
     if (this.#workerState === "starting" || this.#workerState === "active")
@@ -971,7 +977,7 @@ export class Deinterlacer extends EventTarget {
     return true;
   }
 
-  /** 表示中の canvas を置き換えてから、新しい canvas の制御を Worker へ移す。 */
+  /** Transfer the display canvas to a new Worker, replacing it if already transferred. */
   #startWorker(): void {
     this.#closePendingWorkerFrame();
     this.#worker?.terminate();
@@ -981,7 +987,8 @@ export class Deinterlacer extends EventTarget {
     this.#workerFilmError = null;
     this.#workerFilmFailure = 0;
     let canvas = this.#displayCanvas;
-    // 初回は公開済みの要素をそのまま使い、片方向転送済みの canvas を復旧する場合だけ新しい要素へ差し替える。
+    // Use the published element on the first start. A transferred canvas
+    // cannot be transferred again, so recovery needs a fresh element.
     if (this.#displayCanvasTransferred) {
       canvas = document.createElement("canvas");
       canvas.className = this.#displayCanvas.className;
@@ -999,7 +1006,8 @@ export class Deinterlacer extends EventTarget {
     let worker: Worker;
     let offscreen: OffscreenCanvas;
     try {
-      // canvas の制御移動後はメインスレッドへ戻せないため、以降の失敗は未転送の描画用 canvas へ切り替える。
+      // Transfer is one-way. Falling back after this point uses the separate
+      // rendering canvas whose control still belongs to the main thread.
       offscreen = canvas.transferControlToOffscreen();
       this.#displayCanvasTransferred = true;
       worker = new Worker(this.#workerURL!, { type: "module" });
@@ -1033,7 +1041,7 @@ export class Deinterlacer extends EventTarget {
     );
   }
 
-  /** Worker の通知を反映し、入力を1枚ずつ送るための待機を解除する。 */
+  /** Apply Worker notifications and release the wait for the next input frame. */
   #onWorkerMessage(notification: WorkerNotification): void {
     switch (notification.type) {
       case "ready":
@@ -1158,7 +1166,7 @@ export class Deinterlacer extends EventTarget {
     return true;
   }
 
-  /** 一時的な Worker 障害を1回だけ復旧し、再失敗時は media element 自体を表示する。 */
+  /** Retry a transient Worker failure once, then show the media element if it fails again. */
   #workerFailed(message: string): void {
     if (
       this.#workerState === "starting" &&
@@ -1183,7 +1191,7 @@ export class Deinterlacer extends EventTarget {
     this.stop();
   }
 
-  /** Worker を自動選択できなかった場合は元のメインスレッド用 canvas へ戻す。 */
+  /** Restore the main-thread canvas when automatic Worker selection fails. */
   #fallBackToMain(): void {
     const mainCanvas = this.#renderCanvas as HTMLCanvasElement;
     mainCanvas.className = this.#displayCanvas.className;
@@ -1206,13 +1214,13 @@ export class Deinterlacer extends EventTarget {
     }
   }
 
-  /** 描画先を切り替えるとき、ページ側がまだ所有する待機フレームを閉じる。 */
+  /** Close the queued frame still owned by the page when switching renderers. */
   #closePendingWorkerFrame(): void {
     this.#pendingWorkerFrame?.frame.close();
     this.#pendingWorkerFrame = null;
   }
 
-  /** Worker の再構築後には応答できない capture を失敗として完了する。 */
+  /** Reject captures whose replies would be lost when the Worker is rebuilt. */
   #rejectCaptureRequests(message: string): void {
     for (const request of this.#captureRequests.values())
       request.reject(new Error(message));
@@ -1230,12 +1238,14 @@ export class Deinterlacer extends EventTarget {
     this.#mount();
     this.#startFrameWatchdog();
     if (this.#ensureWorker()) {
-      // `start()` は `enabled` のセッターを経由しない公開経路なので、既存 Worker にも稼働状態を明示する
+      // `start()` can be called without going through the `enabled` setter,
+      // so an existing Worker needs the enabled state explicitly.
       this.#worker?.postMessage({
         type: "enabled",
         enabled: true,
       } satisfies WorkerCommand);
-      // 起動済み Worker から `ready` は再送されないため、`stop()` で解除した requestVideoFrameCallback() をここで張り直す
+      // An active Worker will not send `ready` again. Re-arm the frame
+      // callback that `stop()` cancelled.
       if (this.#workerState === "active") this.#request();
       return;
     }
@@ -1409,7 +1419,7 @@ export class Deinterlacer extends EventTarget {
     this.#videoFrames.request(this.#onFrame);
   }
 
-  /** seek と表示周期の判断に必要な DOM 側の再生状態を複製する。 */
+  /** Copy the element's playback state for seek and presentation timing decisions. */
   #workerVideoState(): WorkerVideoState {
     const buffered: Array<{ start: number; end: number }> = [];
     for (let index = 0; index < this.#video.buffered.length; index++)
@@ -1430,7 +1440,7 @@ export class Deinterlacer extends EventTarget {
     };
   }
 
-  /** 転送中1枚と最新の待機1枚だけを保持し、音声時計からの遅延蓄積を防ぐ。 */
+  /** Keep one frame in flight and the newest one waiting, staying close to the audio clock. */
   #queueWorkerFrame(
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
@@ -1446,7 +1456,8 @@ export class Deinterlacer extends EventTarget {
         });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      // 最初のフレームを生成できない環境では Worker 経路を利用できないため、自動選択時はメインスレッドの描画へ移す
+      // Failure to create the first frame means this browser cannot use the
+      // Worker path. Automatic selection falls back to main-thread rendering.
       if (
         this.#rendering === "auto" &&
         !this.#workerAcceptedFrame &&
@@ -1462,7 +1473,8 @@ export class Deinterlacer extends EventTarget {
     const pending: PendingWorkerFrame = {
       id: ++this.#workerFrameID,
       frame,
-      // 取得側の画素バッファは次の入力で再利用されるため、ACK 待ちの画像はここで所有する
+      // Acquisition reuses its pixel buffer for the next input. Keep an owned
+      // copy while this frame waits for the Worker's acknowledgement.
       pixels: pixels
         ? new ImageData(pixels.data.slice(), pixels.width, pixels.height)
         : undefined,
@@ -1478,7 +1490,7 @@ export class Deinterlacer extends EventTarget {
     this.#sendWorkerFrame(pending);
   }
 
-  /** 直前の入力を Worker が解放した後に、選択済みフレームを転送する。 */
+  /** Transfer the selected frame once the Worker has released the previous input. */
   #sendWorkerFrame(pending: PendingWorkerFrame): void {
     const worker = this.#worker;
     if (!worker || this.#workerState !== "active") {
@@ -1506,7 +1518,8 @@ export class Deinterlacer extends EventTarget {
       this.#workerFrameInFlight = false;
       pending.frame.close();
       const message = error instanceof Error ? error.message : String(error);
-      // 最初のフレーム転送失敗は機能不足として扱い、実動後の障害だけを再構築の対象にする。
+      // A first-transfer failure means the path is unsupported. Rebuild only
+      // after the Worker has demonstrated that it can consume frames.
       if (
         this.#rendering === "auto" &&
         !this.#workerAcceptedFrame &&
@@ -1686,7 +1699,8 @@ export class Deinterlacer extends EventTarget {
 
   #onFrame = (now: DOMHighResTimeStamp, metadata: FrameMetadata): void => {
     if (!this.#running || this.#lost) return;
-    // フレーム通知が DOM の監視より先に届いた場合も、現在のウインドウへ描画の予約を移す
+    // A frame may arrive before the DOM observer runs; move pending drawing
+    // requests to the current window here as well.
     this.#followOwner();
     // The acquisition reports on the clock of whichever window owns the video
     // node; everything this class times -- the watchdog, the statistics
@@ -1707,8 +1721,8 @@ export class Deinterlacer extends EventTarget {
   };
 
   /**
-   * どちらの通知経路で見つけたフレームも選択中の描画先へ取り込む。
-   * `now` はこの realm の時計で測った取込み時刻。
+   * Take a frame from either acquisition path into the selected renderer.
+   * `now` is the ingestion time on this realm's clock.
    */
   #ingestFrame(
     now: DOMHighResTimeStamp,
@@ -1724,9 +1738,10 @@ export class Deinterlacer extends EventTarget {
   }
 
   /**
-   * @internal Worker でもメインスレッドと同じ履歴と描画判断を使うための入口。
-   * `now` はこの Worker の時計で測った取込み時刻を渡す。metadata の表示予定
-   * 時刻はページ側の時計のままでよく、同梱の timeOrigin から変換する。
+   * @internal Feed Worker input through the same history and rendering decisions
+   * as main-thread input. `now` is the ingestion time on the Worker's clock.
+   * The metadata's display time stays on the page's clock and is converted
+   * using the accompanying timeOrigin.
    */
   ingestExternalFrame(
     now: DOMHighResTimeStamp,
@@ -1742,7 +1757,7 @@ export class Deinterlacer extends EventTarget {
     }
   }
 
-  /** 1枚の入力を共通の履歴へ取り込み、YADIF と IVTC の表示判断を完了する。 */
+  /** Take one input into the shared history and decide its YADIF or IVTC presentation. */
   #processFrame(now: DOMHighResTimeStamp, metadata: FrameObservation): void {
     const revision = this.#playbackRevision;
     if (!this.#frameIsCurrent(revision)) return;
@@ -2328,7 +2343,7 @@ export class Deinterlacer extends EventTarget {
     return { frames, handle };
   }
 
-  /** 予約した表示機会を、それを発行した window 自身で取り消す。 */
+  /** Cancel a pending animation frame through the source that issued it. */
   #cancelAnimationRequest(request: AnimationRequest | null): void {
     request?.frames.cancelAnimationFrame(request.handle);
   }
@@ -2368,7 +2383,7 @@ export class Deinterlacer extends EventTarget {
     }
   }
 
-  /** 描画が停止する非表示通知と DOM の移動を、現在のウインドウで監視する */
+  /** Watch the current document for visibility changes and DOM adoption. */
   #watchOwnerDocument(): void {
     const owner = this.#externalHost
       ? null
@@ -2389,7 +2404,7 @@ export class Deinterlacer extends EventTarget {
     if (!this.#destroyed) this.#followOwner();
   };
 
-  /** ページ側の監視を開始し、描画ループの停止中も復号フレームの到着を検査する。 */
+  /** Watch for decoded frames on the page even while the drawing loop is stopped. */
   #startFrameWatchdog(): void {
     if (
       this.#externalHost ||
@@ -2401,13 +2416,13 @@ export class Deinterlacer extends EventTarget {
     this.#watchdogRequest = this.#armAnimationFrame(this.#onFrameWatchdog);
   }
 
-  /** ページ側で予約済みのフレーム監視を取り消す。 */
+  /** Cancel the page's pending frame watchdog request. */
   #stopFrameWatchdog(): void {
     this.#cancelAnimationRequest(this.#watchdogRequest);
     this.#watchdogRequest = null;
   }
 
-  /** requestAnimationFrame() ごとにフレーム通知の停止を検査し、次の監視を予約する。 */
+  /** Check for stalled frame callbacks at each animation frame, then re-arm the watchdog. */
   #onFrameWatchdog = (now: DOMHighResTimeStamp): void => {
     this.#watchdogRequest = null;
     if (!this.#running || this.#lost) return;
@@ -2419,11 +2434,12 @@ export class Deinterlacer extends EventTarget {
       this.#watchdogRequest = this.#armAnimationFrame(this.#onFrameWatchdog);
   };
 
-  /** 通知停止を検出したら、画像取得を VideoFrames の代替経路へ切り替える */
+  /** Switch to the VideoFrames fallback when frame callbacks have stalled. */
   #recoverFrameCallback(now: DOMHighResTimeStamp): void {
     if (this.#externalHost) return;
     if (this.#videoFrames.captureDriven) return;
-    // Firefox では描画済み枚数を VideoFrames 自身が監視し、その変化を画像の到着として扱う
+    // On Firefox, VideoFrames watches painted-frame counters itself and
+    // treats each change as a new picture.
     if (this.#videoFrames.mozDriven && this.#videoFrames.hasDelivered) return;
     if (
       now - this.#lastVideoFrameCallbackAt < FRAME_CALLBACK_TIMEOUT_MS ||
@@ -2526,7 +2542,7 @@ export class Deinterlacer extends EventTarget {
     this.#frames = 0;
   }
 
-  /** DOM の visibility 変更はページ側に残し、Worker からは状態だけを通知する。 */
+  /** Apply visibility on the page; a Worker reports only the desired state. */
   #setVisible(visible: boolean): void {
     if (this.#externalHost) {
       this.#externalHost.onVisibility(visible);
@@ -2943,7 +2959,7 @@ export class Deinterlacer extends EventTarget {
 
   #onResize = (): void => this.#layout();
 
-  /** media event と、その意味を決めたページ側の再生状態を Worker へ転送する。 */
+  /** Forward a media event with the page's playback state that gives it meaning. */
   #postWorkerEvent(
     name: "emptied" | "pause" | "ended" | "seeking" | "seeked" | "ratechange",
   ): boolean {
@@ -3098,7 +3114,7 @@ export class Deinterlacer extends EventTarget {
   };
 }
 
-/** @internal Worker 内の OffscreenCanvas へ共通描画エンジンを接続する。 */
+/** @internal Connect the shared rendering engine to an OffscreenCanvas in a Worker. */
 export function createWorkerDeinterlacer(
   video: HTMLVideoElement,
   canvas: OffscreenCanvas,
