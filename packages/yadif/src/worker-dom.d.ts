@@ -99,6 +99,18 @@ declare var ResizeObserver: {
   new (callback: () => void): ResizeObserver;
 };
 
+interface MutationObserver {
+  observe(
+    target: Document,
+    options: { childList: boolean; subtree: boolean },
+  ): void;
+  disconnect(): void;
+}
+
+declare var MutationObserver: {
+  new (callback: () => void): MutationObserver;
+};
+
 interface Document {
   readonly defaultView: WindowLike | null;
   addEventListener(type: "visibilitychange", listener: () => void): void;

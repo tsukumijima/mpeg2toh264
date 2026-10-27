@@ -480,6 +480,7 @@ export class Deinterlacer extends EventTarget {
   #watchdogRequest: AnimationRequest | null = null;
   /** The document the owner-change listener is on, if any. */
   #ownerDocument: Document | null = null;
+  readonly #ownerChanges: MutationObserver | null;
   /** The gap between animation frames: as near as the page gets to the screen. */
   #refreshMs = DEFAULT_REFRESH_MS;
   /** Where the refresh grid fitted to the animation frames stands. (otya) */
@@ -681,6 +682,14 @@ export class Deinterlacer extends EventTarget {
     this.#resizes = externalHost
       ? null
       : new ResizeObserver(() => this.#layout());
+    // PiP の非表示通知は DOM を戻す前に届き、同じサイズへの移動では resize も発生しない
+    // DOM の移動を観測し、描画コールバックが停止したウインドウからも予約先を切り替える
+    this.#ownerChanges = externalHost
+      ? null
+      : new MutationObserver(() => {
+          if (this.#displayCanvas.ownerDocument !== this.#ownerDocument)
+            this.#layout();
+        });
     this.encodedVideo =
       !externalHost && typeof VideoDecoder !== "undefined"
         ? new EncodedVideoFrames(video)
@@ -1269,6 +1278,7 @@ export class Deinterlacer extends EventTarget {
       this.#onOwnerVisibility,
     );
     this.#ownerDocument = null;
+    this.#ownerChanges?.disconnect();
     this.#renderCanvas.removeEventListener(
       "webglcontextlost",
       this.#onContextLost,
@@ -1666,10 +1676,7 @@ export class Deinterlacer extends EventTarget {
 
   #onFrame = (now: DOMHighResTimeStamp, metadata: FrameMetadata): void => {
     if (!this.#running || this.#lost) return;
-    // A frame arriving is the observation that keeps running through an
-    // adoption -- it comes from the window that now owns the element, which
-    // is the visible one -- so it is where the loop finds out it is armed on
-    // a window that has stopped serving frames.
+    // フレーム通知が DOM の監視より先に届いた場合も、現在のウインドウへ描画の予約を移す
     this.#followOwner();
     // The acquisition reports on the clock of whichever window owns the video
     // node; everything this class times -- the watchdog, the statistics
@@ -2349,15 +2356,7 @@ export class Deinterlacer extends EventTarget {
     }
   }
 
-  /**
-   * The one owner-change signal that does not need an animation frame.
-   *
-   * On Firefox the frames themselves are found by this module's own animation
-   * frames (see VideoFrames), so a hidden window stops the acquisition that
-   * would otherwise notice the move. A document going hidden is exactly when
-   * its frames stop, and it is delivered as an ordinary task, so it arrives.
-   * One listener, moved with the owner and dropped with the deinterlacer.
-   */
+  /** 描画が停止する非表示通知と DOM の移動を、現在のウインドウで監視する */
   #watchOwnerDocument(): void {
     const owner = this.#externalHost
       ? null
@@ -2369,6 +2368,9 @@ export class Deinterlacer extends EventTarget {
     );
     this.#ownerDocument = owner;
     owner?.addEventListener("visibilitychange", this.#onOwnerVisibility);
+    this.#ownerChanges?.disconnect();
+    if (owner)
+      this.#ownerChanges?.observe(owner, { childList: true, subtree: true });
   }
 
   #onOwnerVisibility = (): void => {

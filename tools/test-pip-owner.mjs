@@ -29,6 +29,7 @@ import { join } from "node:path";
 
 import {
   buildBundles,
+  REFRESH_MS,
   gaps,
   heldRefreshes,
   presentations,
@@ -243,6 +244,96 @@ test("a move the old window could still have reported is handled too", async ({
     "playback did not resume on the adopting window",
   );
 });
+
+for (const rendering of ["main", "worker"]) {
+  test(`${rendering} keeps native acquisition when only the canvas returns from PiP`, async ({
+    fixed,
+  }) => {
+    const baseline = await run(fixed, { vsyncs: VSYNCS, rendering });
+    const result = await run(fixed, {
+      vsyncs: VSYNCS,
+      rendering,
+      beforeVsync(vsync, control) {
+        if (vsync === 60 || vsync === 121) {
+          const name = vsync === 60 ? "pipA" : "page";
+          control.pageContext.__displayDocument = control.view(
+            name,
+            PIP_A_ORIGIN,
+          ).document;
+          if (vsync === 121) {
+            control.suspend("pipA");
+            control.views.get("pipA").closed = true;
+            control.resume("page");
+          }
+          control.deinterlacer(
+            "adoptSubtree(__deinterlacer.canvas, __displayDocument)",
+          );
+          if (vsync === 60) control.suspend("page");
+        }
+      },
+    });
+    assert.equal(
+      result.videoFrames.created,
+      baseline.videoFrames.created,
+      "moving the display canvas started capturing a video whose callbacks still arrive",
+    );
+    assert.ok(
+      presentations(result.draws).filter((entry) => entry.refresh > 140)
+        .length > 90,
+      "drawing stopped after the display canvas returned",
+    );
+    assert.equal(result.failures.length, 0, result.failures[0]?.message);
+  });
+
+  test(`${rendering} resumes after visibility precedes adoption and native callbacks stop`, async ({
+    fixed,
+  }) => {
+    const result = await run(fixed, {
+      vsyncs: VSYNCS,
+      rendering,
+      beforeVsync(vsync, control) {
+        if (vsync === 60) {
+          control.adopt("pipA", PIP_A_ORIGIN);
+          control.suspend("page");
+        }
+        if (vsync === 118) control.frames(false);
+        if (vsync >= 118) {
+          control.video.currentTime = (vsync * REFRESH_MS) / 1000;
+          control.video.pictureTime =
+            (Math.floor(vsync / 2) * 2 * REFRESH_MS) / 1000;
+          control.video.totalVideoFrames = Math.floor(vsync / 2) + 1;
+        }
+        if (vsync === 120) {
+          // PiP を閉じたときの順序を再現し、サイズ変更と rVFC からの救済を除く
+          control.suspend("pipA");
+          control.views.get("pipA").closed = true;
+          control.resume("page");
+          control.adopt("page");
+        }
+      },
+    });
+    const decisions = presentations(result.draws);
+    assert.ok(
+      decisions.filter((entry) => entry.refresh > 140).length > 90,
+      "pictures stopped being presented after the PiP window closed",
+    );
+    assert.deepEqual(
+      ledger(result)
+        .stranded.filter(([view]) => view !== "worker")
+        .map(([view]) => view),
+      ["page"],
+      "animation requests remained on the closed window",
+    );
+    assert.equal(result.failures.length, 0, result.failures[0]?.message);
+    result.control.deinterlacer("__deinterlacer.destroy()");
+    for (const view of result.control.views.values())
+      assert.equal(
+        view.document.observers.size,
+        0,
+        "destroy left a DOM observer attached",
+      );
+  });
+}
 
 test("stopping and destroying leave nothing armed anywhere", async ({
   fixed,

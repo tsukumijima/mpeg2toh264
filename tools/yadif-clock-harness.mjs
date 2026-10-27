@@ -333,6 +333,7 @@ class FakeDocument {
   constructor(view) {
     this.defaultView = view;
     this.visibilityState = "visible";
+    this.observers = new Set();
   }
   addEventListener(type, listener) {
     if (type === "visibilitychange") this.#listeners.add(listener);
@@ -357,6 +358,7 @@ class FakeWindow {
     this.name = name;
     this.performance = clock;
     this.document = new FakeDocument(this);
+    this.closed = false;
   }
   requestAnimationFrame(callback) {
     return __host.requestAnimationFrame(this.name, callback);
@@ -376,8 +378,21 @@ const document = window0.document;
 
 /** Re-point a subtree at another document, as adoption does. */
 function adoptSubtree(node, target) {
+  const previous = node.ownerDocument;
   node.ownerDocument = target;
   for (const child of node.children) adoptSubtree(child, target);
+  for (const observer of previous?.observers ?? []) observer.notify();
+}
+
+class MutationObserver {
+  constructor(callback) { this.callback = callback; this.target = null; this.pending = false; }
+  observe(target) { this.target = target; target.observers.add(this); }
+  disconnect() { this.target?.observers.delete(this); this.target = null; }
+  notify() {
+    if (this.pending) return;
+    this.pending = true;
+    queueMicrotask(() => { this.pending = false; if (this.target) this.callback(); });
+  }
 }
 
 class ResizeObserver {
@@ -439,7 +454,7 @@ class Worker {
 }
 
 Object.assign(globalThis, {
-  FakeElement, HTMLCanvasElement, document, ResizeObserver, FakeVideo, Worker,
+  FakeElement, HTMLCanvasElement, document, ResizeObserver, MutationObserver, FakeVideo, Worker,
   FakeWindow, FakeDocument, adoptSubtree, window0,
   makeView: (name, timeOrigin) =>
     new FakeWindow(name, { timeOrigin, now: () => __host.now() - timeOrigin }),
