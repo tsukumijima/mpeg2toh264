@@ -1271,7 +1271,7 @@ class ke {
   get mozDriven() {
     return this.#e !== null && !this.#c;
   }
-  /** 実画像のタイムスタンプでフレームを取得しているか */
+  /** Whether acquisition uses the captured pictures' own timestamps. */
   get captureDriven() {
     return this.#c;
   }
@@ -1288,7 +1288,7 @@ class ke {
       this.#o = this.#e ? requestAnimationFrame(this.#F) : this.#t.requestVideoFrameCallback(this.#X);
     }
   }
-  /** 通知停止後も、倍速再生と同じ画像取得経路で再生中のフレームを届ける */
+  /** Recover stalled callbacks through the capture path used for faster playback. */
   recover() {
     this.#s === null || this.#c || this.#e || (this.#o !== null && this.#t.cancelVideoFrameCallback(this.#o), this.#o = null, this.#h ? (this.#a = !0, this.#c = !0, this.#v()) : this.#o = this.#t.requestVideoFrameCallback(this.#X));
   }
@@ -1324,7 +1324,7 @@ class ke {
             height: i.visibleRect?.height ?? i.codedHeight,
             mediaTime: i.timestamp / 1e6,
             presentedFrames: t.count,
-            // 描画機会まで保持した画像は、この更新以降に表示する時刻として扱う
+            // A picture held until this refresh is scheduled no earlier than now.
             expectedDisplayTime: Math.max(t.at, e),
             timeOrigin: performance.timeOrigin,
             frame: i,
@@ -1549,7 +1549,7 @@ class it extends EventTarget {
   /** The requestAnimationFrame() loop that puts them up, which is all that draws on the canvas. */
   #d = null;
   #C = 0;
-  /** ページ側で frame callback の停止を監視する requestAnimationFrame()。 */
+  /** The page's requestAnimationFrame() that watches for stalled frame callbacks. */
   #l = null;
   /** The document the owner-change listener is on, if any. */
   #x = null;
@@ -1597,7 +1597,7 @@ class it extends EventTarget {
   #Ze = 0;
   /** A destination frame that arrived before the browser finished seeking. */
   #ye = !1;
-  /** 画像取得経路から最後にフレームを受け取った時刻 */
+  /** When the last frame arrived from the acquisition path. */
   #Ye = 0;
   #M = !1;
   /** Cancels work suspended inside a synchronous owner callback. */
@@ -1703,7 +1703,7 @@ class it extends EventTarget {
   get running() {
     return this.#M && (this.#g?.interlaced ?? !0);
   }
-  /** 現在 media element の上に配置している HTML canvas。 */
+  /** The HTML canvas currently placed over the media element. */
   get canvas() {
     return this.#n;
   }
@@ -1711,7 +1711,7 @@ class it extends EventTarget {
   get #bt() {
     return this.#g?.topFieldFirst !== !1;
   }
-  /** どの描画先にも同じ公開オプションを渡す。 */
+  /** The same public filter options for either rendering target. */
   #xt() {
     return {
       doubleRate: this.#S,
@@ -1810,7 +1810,7 @@ class it extends EventTarget {
   #gt() {
     this.#H || (this.#$t ? (this.#I > 0 && this.#Nt(), (this.#g?.interlaced ?? !0) && (this.#_ || this.#E === "main") && this.#Pe()) : this.#F || (this.#a = null, this.#K(!1), this.#Le()));
   }
-  /** Worker と canvas を再構築せずに変更可能なフィルター設定を反映する。 */
+  /** Apply mutable filter settings to the existing Worker and canvas. */
   #Ee(e) {
     this.#m?.postMessage({
       type: "settings",
@@ -1829,11 +1829,11 @@ class it extends EventTarget {
   #rt() {
     this.#Ie && (this.#oe.length > 0 || (this.#g?.interlaced ?? !0)) ? this.start() : this.stop();
   }
-  /** 転送に必要な API がそろっている場合だけ同梱 Worker を起動する。 */
+  /** Start the bundled Worker when the required transfer APIs are available. */
   #Qt() {
     return this.#_ || this.#Z === "main" ? !1 : this.#E === "starting" || this.#E === "active" ? !0 : typeof Worker < "u" && typeof VideoFrame < "u" && typeof OffscreenCanvas < "u" && this.#Ke !== null && "transferControlToOffscreen" in HTMLCanvasElement.prototype ? (this.#Ft(), !0) : this.#Z === "auto" ? (this.#Xe(), !1) : (this.#E = "failed", this.#M = !1, !0);
   }
-  /** 表示中の canvas を置き換えてから、新しい canvas の制御を Worker へ移す。 */
+  /** Transfer the display canvas to a new Worker, replacing it if already transferred. */
   #Ft() {
     this.#q(), this.#m?.terminate(), this.#m = null, this.#Fe = !1, this.#Ue = !1, this.#it = null, this.#st = 0;
     let e = this.#n;
@@ -1870,7 +1870,7 @@ class it extends EventTarget {
       [s]
     );
   }
-  /** Worker の通知を反映し、入力を1枚ずつ送るための待機を解除する。 */
+  /** Apply Worker notifications and release the wait for the next input frame. */
   #Zt(e) {
     switch (e.type) {
       case "ready":
@@ -1951,7 +1951,7 @@ class it extends EventTarget {
   #we() {
     return this.#H ? !1 : (this.#m || (this.#se = null), !0);
   }
-  /** 一時的な Worker 障害を1回だけ復旧し、再失敗時は media element 自体を表示する。 */
+  /** Retry a transient Worker failure once, then show the media element if it fails again. */
   #ke(e) {
     if (this.#E === "starting" && this.#Z === "auto" && !this.#Te) {
       this.#Xe();
@@ -1963,18 +1963,18 @@ class it extends EventTarget {
     }
     console.error(`Deinterlacer Worker stopped: ${e}`), this.#E = "failed", this.#m?.terminate(), this.#m = null, this.#q(), this.#nt(`deinterlacer worker stopped: ${e}`), this.stop();
   }
-  /** Worker を自動選択できなかった場合は元のメインスレッド用 canvas へ戻す。 */
+  /** Restore the main-thread canvas when automatic Worker selection fails. */
   #Xe() {
     const e = this.#t;
     e.className = this.#n.className;
     const t = this.#n.getAttribute("style");
     t === null ? e.removeAttribute("style") : e.setAttribute("style", t), e.style.visibility = "hidden", this.#n.parentElement && this.#n.replaceWith(e), this.#n = e, this.#et = !1, this.#m?.terminate(), this.#m = null, this.#E = "main", this.#q(), this.#M && (this.#be(), this.#mt(), (this.#g?.interlaced ?? !0) && this.#Pe());
   }
-  /** 描画先を切り替えるとき、ページ側がまだ所有する待機フレームを閉じる。 */
+  /** Close the queued frame still owned by the page when switching renderers. */
   #q() {
     this.#he?.frame.close(), this.#he = null;
   }
-  /** Worker の再構築後には応答できない capture を失敗として完了する。 */
+  /** Reject captures whose replies would be lost when the Worker is rebuilt. */
   #Dt(e) {
     for (const t of this.#De.values())
       t.reject(new Error(e));
@@ -2062,7 +2062,7 @@ class it extends EventTarget {
   #be() {
     this.#_ || !this.#M || this.#o.request(this.#ti);
   }
-  /** seek と表示周期の判断に必要な DOM 側の再生状態を複製する。 */
+  /** Copy the element's playback state for seek and presentation timing decisions. */
   #At() {
     const e = [];
     for (let t = 0; t < this.#e.buffered.length; t++)
@@ -2082,7 +2082,7 @@ class it extends EventTarget {
       buffered: e
     };
   }
-  /** 転送中1枚と最新の待機1枚だけを保持し、音声時計からの遅延蓄積を防ぐ。 */
+  /** Keep one frame in flight and the newest one waiting, staying close to the audio clock. */
   #Yt(e, t, i, s) {
     let r;
     try {
@@ -2097,7 +2097,8 @@ class it extends EventTarget {
     const o = {
       id: ++this.#Ht,
       frame: r,
-      // 取得側の画素バッファは次の入力で再利用されるため、ACK 待ちの画像はここで所有する
+      // Acquisition reuses its pixel buffer for the next input. Keep an owned
+      // copy while this frame waits for the Worker's acknowledgement.
       pixels: s ? new ImageData(s.data.slice(), s.width, s.height) : void 0,
       now: e,
       metadata: t,
@@ -2109,7 +2110,7 @@ class it extends EventTarget {
     }
     this.#Rt(o);
   }
-  /** 直前の入力を Worker が解放した後に、選択済みフレームを転送する。 */
+  /** Transfer the selected frame once the Worker has released the previous input. */
   #Rt(e) {
     const t = this.#m;
     if (!t || this.#E !== "active") {
@@ -2239,8 +2240,8 @@ ${s} dropped:${this.#tt}`;
     this.#be();
   };
   /**
-   * どちらの通知経路で見つけたフレームも選択中の描画先へ取り込む。
-   * `now` はこの realm の時計で測った取込み時刻。
+   * Take a frame from either acquisition path into the selected renderer.
+   * `now` is the ingestion time on this realm's clock.
    */
   #ii(e, t, i, s) {
     if (this.#E === "active") {
@@ -2250,9 +2251,10 @@ ${s} dropped:${this.#tt}`;
     this.#E !== "starting" && this.#He(e, t);
   }
   /**
-   * @internal Worker でもメインスレッドと同じ履歴と描画判断を使うための入口。
-   * `now` はこの Worker の時計で測った取込み時刻を渡す。metadata の表示予定
-   * 時刻はページ側の時計のままでよく、同梱の timeOrigin から変換する。
+   * @internal Feed Worker input through the same history and rendering decisions
+   * as main-thread input. `now` is the ingestion time on the Worker's clock.
+   * The metadata's display time stays on the page's clock and is converted
+   * using the accompanying timeOrigin.
    */
   ingestExternalFrame(e, t, i, s) {
     this.#Ae = s ?? i;
@@ -2262,7 +2264,7 @@ ${s} dropped:${this.#tt}`;
       this.#Ae = this.#e;
     }
   }
-  /** 1枚の入力を共通の履歴へ取り込み、YADIF と IVTC の表示判断を完了する。 */
+  /** Take one input into the shared history and decide its YADIF or IVTC presentation. */
   #He(e, t) {
     const i = this.#ie;
     if (this.#$(i) && (this.#si(t.mediaTime), !!this.#$(i) && t.width > 0 && t.height > 0)) {
@@ -2553,7 +2555,7 @@ ${s} dropped:${this.#tt}`;
     );
     return { frames: t, handle: s };
   }
-  /** 予約した表示機会を、それを発行した window 自身で取り消す。 */
+  /** Cancel a pending animation frame through the source that issued it. */
   #Qe(e) {
     e?.frames.cancelAnimationFrame(e.handle);
   }
@@ -2578,7 +2580,7 @@ ${s} dropped:${this.#tt}`;
     const { frames: e } = this.#Ct(), t = this.#d !== null && this.#d.frames !== e, i = this.#l !== null && this.#l.frames !== e;
     !t && !i || (this.#C = 0, t && (this.#Qe(this.#d), this.#d = this.#xe(this.#ut)), i && (this.#Qe(this.#l), this.#l = this.#xe(this.#pt)));
   }
-  /** 描画が停止する非表示通知と DOM の移動を、現在のウインドウで監視する */
+  /** Watch the current document for visibility changes and DOM adoption. */
   #ni() {
     const e = this.#_ ? null : this.#n.ownerDocument ?? null;
     e !== this.#x && (this.#x?.removeEventListener(
@@ -2589,21 +2591,21 @@ ${s} dropped:${this.#tt}`;
   #dt = () => {
     this.#H || this.#ft();
   };
-  /** ページ側の監視を開始し、描画ループの停止中も復号フレームの到着を検査する。 */
+  /** Watch for decoded frames on the page even while the drawing loop is stopped. */
   #mt() {
     this.#_ || this.#l !== null || !this.#M || this.#O || (this.#l = this.#xe(this.#pt));
   }
-  /** ページ側で予約済みのフレーム監視を取り消す。 */
+  /** Cancel the page's pending frame watchdog request. */
   #oi() {
     this.#Qe(this.#l), this.#l = null;
   }
-  /** requestAnimationFrame() ごとにフレーム通知の停止を検査し、次の監視を予約する。 */
+  /** Check for stalled frame callbacks at each animation frame, then re-arm the watchdog. */
   #pt = (e) => {
     if (this.#l = null, !this.#M || this.#O) return;
     const t = this.#ie;
     this.#o.flush(e), this.#$(t) && (this.#Ai(e), this.#$(t) && (this.#l = this.#xe(this.#pt)));
   };
-  /** 通知停止を検出したら、画像取得を VideoFrames の代替経路へ切り替える */
+  /** Switch to the VideoFrames fallback when frame callbacks have stalled. */
   #Ai(e) {
     this.#_ || this.#o.captureDriven || this.#o.mozDriven && this.#o.hasDelivered || e - this.#Ye < Ie || this.#e.paused || this.#e.ended || this.#e.readyState < 2 || (this.#be(), this.#o.recover());
   }
@@ -2652,7 +2654,7 @@ ${s} dropped:${this.#tt}`;
     const e = this.#A[this.#U];
     e && this.#vt(e, !0), this.#R = 0;
   }
-  /** DOM の visibility 変更はページ側に残し、Worker からは状態だけを通知する。 */
+  /** Apply visibility on the page; a Worker reports only the desired state. */
   #K(e) {
     if (this.#_) {
       this.#_.onVisibility(e);
@@ -2864,7 +2866,7 @@ ${s} dropped:${this.#tt}`;
     this.#Q = null, this.#te?.disconnect(), this.#n.remove(), e?.parentElement && (e.parentElement.insertBefore(this.#e, e), e.remove());
   }
   #Gt = () => this.#Be();
-  /** media event と、その意味を決めたページ側の再生状態を Worker へ転送する。 */
+  /** Forward a media event with the page's playback state that gives it meaning. */
   #Et(e) {
     return !this.#m || this.#E === "main" ? !1 : (this.#m.postMessage({
       type: "event",

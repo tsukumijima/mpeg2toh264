@@ -43,7 +43,7 @@ export interface DeinterlaceStats {
      * (otya)
      */
     resynced: number;
-    /** 表示機会を過ぎたか、表示時計と予定時刻が食い違ったために描画されなかったフィールド数。 */
+    /** Fields skipped because their display time passed or disagreed with the presentation clock. */
     late: number;
     /**
      * Times the presentation queue was reset because its scheduled lead exceeded
@@ -52,7 +52,11 @@ export interface DeinterlaceStats {
     queueResetted: number;
     /** Frames presented per second over the last report. */
     fps: number;
-    /** 直近区間で入力1枚のアップロード、フィルター、表示に費やした描画スレッド上の平均時間。GPU の実行時間と Worker 描画時のメインスレッド占有時間は含まない。 */
+    /**
+     * Average rendering-thread time per input frame spent uploading, filtering
+     * and presenting during the last report. Excludes GPU execution time and,
+     * when rendering in a Worker, time spent on the main thread.
+     */
     frameMs: number;
     /**
      * The largest number of pictures queued during the last reporting interval,
@@ -83,7 +87,7 @@ export interface DeinterlaceStats {
 export interface DeinterlacerOptions {
     /** Rendering target, defaulting to `main`; `auto` prefers the bundled Worker and falls back to the main thread if initialization fails. */
     rendering?: "auto" | "worker" | "main";
-    /** module Worker の URL。省略時はパッケージへ同梱したファイルを使う。 */
+    /** The module Worker's URL, defaulting to the file bundled with the package. */
     workerUrl?: string | URL;
     /**
      * Whether to show a picture for every field rather than for every frame.
@@ -177,7 +181,7 @@ export declare class Deinterlacer extends EventTarget {
     readonly encodedVideo: EncodedVideoFrames | null;
     constructor(video: HTMLVideoElement, options?: DeinterlacerOptions);
     get running(): boolean;
-    /** 現在 media element の上に配置している HTML canvas。 */
+    /** The HTML canvas currently placed over the media element. */
     get canvas(): HTMLCanvasElement;
     /** Whether the caller wants filtering, independently of the current source. */
     get enabled(): boolean;

@@ -1,42 +1,43 @@
 import type { DeinterlaceStats, Scan, VideoState } from "./deinterlace.js";
-/** ページ側で観測した1枚の復号フレームに付随する情報。 */
+/** What the page observed alongside one decoded frame. */
 interface WorkerFrameObservation {
     mediaTime: number;
     presentedFrames: number;
     /**
-     * requestVideoFrameCallback() が報告した表示予定時刻。測ったのは取得側の
-     * 時計なので、Worker は `timeOrigin` との差で自分の時計へ変換してから
-     * 表示スケジュールの起点に使う。
+     * The display time reported by requestVideoFrameCallback(), measured on
+     * the acquisition clock. The Worker translates it using `timeOrigin`
+     * before anchoring its presentation schedule to it.
      */
     expectedDisplayTime: number;
     /**
-     * `expectedDisplayTime` を測った realm の performance.timeOrigin。
+     * The performance.timeOrigin against which `expectedDisplayTime` was measured.
      *
-     * フレームごとに送る。取得した realm はフレームごとに変わりうる
-     * (document picture-in-picture が video ノードを別ウィンドウへ移す) ため
-     * initialize の一度きりでは古くなる。ACK 待ちで保留したフレームは取得
-     * 時点の原点をそのまま保持する。
+     * Sent with every frame: document picture-in-picture can move the video
+     * node to another window between frames, so an origin sent only at
+     * initialization would go stale. A frame waiting for an acknowledgement
+     * keeps the origin recorded when it was acquired.
      */
     timeOrigin: number;
     width: number;
     height: number;
     /**
-     * Firefox カウンター計時。spread と structured clone で線を越えるため
-     * 宣言にも載せ、将来のリテラル化で moz 配線が外れないようにする。
+     * Timing from Firefox's frame counters. Include it in the wire type so
+     * an explicit message literal carries it just as spread and structured
+     * clone do.
      */
     mozTiming?: {
         periodMs: number;
         discontinuity: boolean;
     };
 }
-/** Worker 内の描画エンジンへ渡せるデインタレーサー設定。 */
+/** Deinterlacer settings accepted by the rendering engine inside the Worker. */
 export interface WorkerRenderingOptions {
     doubleRate: boolean;
     spatialCheck: boolean;
     film: boolean;
     debug: boolean;
 }
-/** DOM を参照できない Worker へ複製する media element の状態。 */
+/** Media element state copied to the Worker, where the DOM is unavailable. */
 export interface WorkerVideoState {
     currentTime: number;
     playbackRate: number;
