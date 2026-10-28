@@ -141,9 +141,7 @@ class WebGL2RenderingContext {
   texImage2D(target, level, format, width, height, source) {
     if (this.#texture) Object.assign(this.#texture, { format, width, height });
     if (source && this.#texture)
-      this.#texture.mediaTime = source.data
-        ? new DataView(source.data.buffer).getFloat64(0)
-        : source.pictureTime ?? source.currentTime ?? source.timestamp / 1e6;
+      this.#texture.mediaTime = source.pictureTime ?? source.currentTime ?? source.timestamp / 1e6;
   }
   texSubImage2D() {}
   deleteTexture() {}
@@ -228,20 +226,11 @@ class VideoFrame {
     this.id = ++VideoFrame.created;
   }
   clone() { return new VideoFrame(this); }
-  async copyTo(buffer) {
-    await __host.copyPixels();
-    new DataView(buffer.buffer).setFloat64(0, this.timestamp / 1e6);
-    return [];
-  }
   close() {
     this.closes++;
     VideoFrame.closed++;
     __host.frameClosed(this.id, this.closes);
   }
-}
-
-class ImageData {
-  constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
 }
 
 const performance = {
@@ -266,7 +255,7 @@ function createImageBitmap() {
 }
 
 Object.assign(globalThis, {
-  WebGL2RenderingContext, OffscreenCanvas, VideoFrame, ImageData, performance,
+  WebGL2RenderingContext, OffscreenCanvas, VideoFrame, performance,
   requestAnimationFrame, cancelAnimationFrame, setTimeout, clearTimeout, createImageBitmap,
 });
 `;
@@ -632,12 +621,6 @@ export async function run(bundles, options = {}) {
     },
     clearTimeout(handle) {
       timers.delete(handle);
-    },
-    copyPixels() {
-      if (!options.pixelCopyDelayMs) return;
-      return new Promise((resolve) =>
-        clock.at(clock.now + options.pixelCopyDelayMs, resolve),
-      );
     },
     createWorker(worker) {
       pageWorker = worker;

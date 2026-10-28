@@ -85,9 +85,6 @@ const PERIOD_SMOOTHING = 0.25;
 /** The screen's refresh interval until animation frames have said otherwise. */
 const DEFAULT_REFRESH_MS = 1000 / 60;
 
-/** How long to wait for requestVideoFrameCallback() before trying recovery. */
-const FRAME_CALLBACK_TIMEOUT_MS = 250;
-
 const VERTEX_SHADER = `#version 300 es
 void main() {
   // One triangle over the whole viewport, from the vertex index alone. There
@@ -426,7 +423,6 @@ interface ExternalRenderingHost extends AnimationFrames {
 interface PendingWorkerFrame {
   id: number;
   frame: VideoFrame;
-  pixels?: ImageData;
   now: number;
   metadata: FrameObservation;
   video: WorkerVideoState;
@@ -482,8 +478,8 @@ export class Deinterlacer extends EventTarget {
   /** The requestAnimationFrame() loop that puts them up, which is all that draws on the canvas. */
   #loopRequest: AnimationRequest | null = null;
   #lastLoopAt = 0;
-  /** The page's requestAnimationFrame() that watches for stalled frame callbacks. */
-  #watchdogRequest: AnimationRequest | null = null;
+  /** Deliver captured pictures on the page's refresh during faster playback. */
+  #captureRequest: AnimationRequest | null = null;
   /** The document the owner-change listener is on, if any. */
   #ownerDocument: Document | null = null;
   readonly #ownerChanges: MutationObserver | null;
@@ -533,8 +529,6 @@ export class Deinterlacer extends EventTarget {
   #lastPresentedFrames = 0;
   /** A destination frame that arrived before the browser finished seeking. */
   #seekFrameReady = false;
-  /** When the last frame arrived from the acquisition path. */
-  #lastVideoFrameCallbackAt = 0;
   #running = false;
   /** Cancels work suspended inside a synchronous owner callback. */
   #playbackRevision = 0;
@@ -1048,7 +1042,7 @@ export class Deinterlacer extends EventTarget {
         this.#workerState = "active";
         if (this.#running) {
           this.#request();
-          this.#startFrameWatchdog();
+          this.#startCaptureLoop();
         }
         break;
       case "failed":
@@ -1209,7 +1203,7 @@ export class Deinterlacer extends EventTarget {
     this.#closePendingWorkerFrame();
     if (this.#running) {
       this.#request();
-      this.#startFrameWatchdog();
+      this.#startCaptureLoop();
       if (this.#scan?.interlaced ?? true) this.#startLoop();
     }
   }
@@ -1234,9 +1228,8 @@ export class Deinterlacer extends EventTarget {
     this.#resetStats();
     // A new playback retries film detection if it was requested.
     if (!this.#recoverFilm()) return;
-    this.#lastVideoFrameCallbackAt = performance.now();
     this.#mount();
-    this.#startFrameWatchdog();
+    this.#startCaptureLoop();
     if (this.#ensureWorker()) {
       // `start()` can be called without going through the `enabled` setter,
       // so an existing Worker needs the enabled state explicitly.
@@ -1260,7 +1253,7 @@ export class Deinterlacer extends EventTarget {
     this.#running = false;
     this.#videoFrames.cancel();
     this.encodedVideo?.suspend();
-    this.#stopFrameWatchdog();
+    this.#stopCaptureLoop();
     this.#stopLoop();
     this.#frames = 0;
     this.#presentedPicture = null;
@@ -1445,7 +1438,6 @@ export class Deinterlacer extends EventTarget {
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
     captured?: VideoFrame,
-    pixels?: ImageData,
   ): void {
     let frame: VideoFrame;
     try {
@@ -1473,11 +1465,6 @@ export class Deinterlacer extends EventTarget {
     const pending: PendingWorkerFrame = {
       id: ++this.#workerFrameID,
       frame,
-      // Acquisition reuses its pixel buffer for the next input. Keep an owned
-      // copy while this frame waits for the Worker's acknowledgement.
-      pixels: pixels
-        ? new ImageData(pixels.data.slice(), pixels.width, pixels.height)
-        : undefined,
       now,
       metadata,
       video: this.#workerVideoState(),
@@ -1505,15 +1492,11 @@ export class Deinterlacer extends EventTarget {
       type: "frame",
       id: pending.id,
       frame: pending.frame,
-      pixels: pending.pixels,
       metadata: pending.metadata,
       video: pending.video,
     };
     try {
-      worker.postMessage(command, [
-        pending.frame,
-        ...(pending.pixels ? [pending.pixels.data.buffer] : []),
-      ]);
+      worker.postMessage(command, [pending.frame]);
     } catch (error) {
       this.#workerFrameInFlight = false;
       pending.frame.close();
@@ -1703,17 +1686,15 @@ export class Deinterlacer extends EventTarget {
     // requests to the current window here as well.
     this.#followOwner();
     // The acquisition reports on the clock of whichever window owns the video
-    // node; everything this class times -- the watchdog, the statistics
-    // interval, the presentation queue -- is on this realm's. Convert the one
-    // timestamp here, and let the reported display time travel with its own
+    // node; the statistics interval and presentation queue use this realm's
+    // clock. Convert the timestamp here, and let the display time travel with its own
     // origin so that a Worker renderer can convert it in turn.
     const at = this.#localTime(now, metadata.timeOrigin);
-    this.#lastVideoFrameCallbackAt = at;
     // Pass frames only to their explicit transfer destination, excluding them from Worker metadata.
-    const { frame, pixels, ...observation } = metadata;
-    this.#frameSource = pixels ?? frame ?? this.#video;
+    const { frame, ...observation } = metadata;
+    this.#frameSource = frame ?? this.#video;
     try {
-      this.#ingestFrame(at, observation, frame, pixels);
+      this.#ingestFrame(at, observation, frame);
     } finally {
       this.#frameSource = this.#video;
     }
@@ -1728,10 +1709,9 @@ export class Deinterlacer extends EventTarget {
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
     frame?: VideoFrame,
-    pixels?: ImageData,
   ): void {
     if (this.#workerState === "active") {
-      this.#queueWorkerFrame(now, metadata, frame, pixels);
+      this.#queueWorkerFrame(now, metadata, frame);
       return;
     }
     if (this.#workerState !== "starting") this.#processFrame(now, metadata);
@@ -1747,9 +1727,8 @@ export class Deinterlacer extends EventTarget {
     now: DOMHighResTimeStamp,
     metadata: FrameObservation,
     frame: VideoFrame,
-    pixels?: ImageData,
   ): void {
-    this.#frameSource = pixels ?? frame;
+    this.#frameSource = frame;
     try {
       this.#processFrame(now, metadata);
     } finally {
@@ -2369,17 +2348,17 @@ export class Deinterlacer extends EventTarget {
     const { frames } = this.#animationSource();
     const loopMoved =
       this.#loopRequest !== null && this.#loopRequest.frames !== frames;
-    const watchdogMoved =
-      this.#watchdogRequest !== null && this.#watchdogRequest.frames !== frames;
-    if (!loopMoved && !watchdogMoved) return;
+    const captureMoved =
+      this.#captureRequest !== null && this.#captureRequest.frames !== frames;
+    if (!loopMoved && !captureMoved) return;
     this.#lastLoopAt = 0;
     if (loopMoved) {
       this.#cancelAnimationRequest(this.#loopRequest);
       this.#loopRequest = this.#armAnimationFrame(this.#onLoop);
     }
-    if (watchdogMoved) {
-      this.#cancelAnimationRequest(this.#watchdogRequest);
-      this.#watchdogRequest = this.#armAnimationFrame(this.#onFrameWatchdog);
+    if (captureMoved) {
+      this.#cancelAnimationRequest(this.#captureRequest);
+      this.#captureRequest = this.#armAnimationFrame(this.#onCaptureLoop);
     }
   }
 
@@ -2404,55 +2383,34 @@ export class Deinterlacer extends EventTarget {
     if (!this.#destroyed) this.#followOwner();
   };
 
-  /** Watch for decoded frames on the page even while the drawing loop is stopped. */
-  #startFrameWatchdog(): void {
+  /** Deliver faster-playback captures even when a Worker owns the drawing loop. */
+  #startCaptureLoop(): void {
     if (
       this.#externalHost ||
-      this.#watchdogRequest !== null ||
+      this.#captureRequest !== null ||
+      !this.#videoFrames.captureDriven ||
       !this.#running ||
       this.#lost
     )
       return;
-    this.#watchdogRequest = this.#armAnimationFrame(this.#onFrameWatchdog);
+    this.#captureRequest = this.#armAnimationFrame(this.#onCaptureLoop);
   }
 
-  /** Cancel the page's pending frame watchdog request. */
-  #stopFrameWatchdog(): void {
-    this.#cancelAnimationRequest(this.#watchdogRequest);
-    this.#watchdogRequest = null;
+  /** Cancel the page's pending capture delivery. */
+  #stopCaptureLoop(): void {
+    this.#cancelAnimationRequest(this.#captureRequest);
+    this.#captureRequest = null;
   }
 
-  /** Check for stalled frame callbacks at each animation frame, then re-arm the watchdog. */
-  #onFrameWatchdog = (now: DOMHighResTimeStamp): void => {
-    this.#watchdogRequest = null;
+  /** Flush captured pictures on the refresh that will present them. */
+  #onCaptureLoop = (now: DOMHighResTimeStamp): void => {
+    this.#captureRequest = null;
     if (!this.#running || this.#lost) return;
     const revision = this.#playbackRevision;
     this.#videoFrames.flush(now);
-    if (!this.#frameIsCurrent(revision)) return;
-    this.#recoverFrameCallback(now);
-    if (this.#frameIsCurrent(revision))
-      this.#watchdogRequest = this.#armAnimationFrame(this.#onFrameWatchdog);
+    if (this.#frameIsCurrent(revision) && this.#videoFrames.captureDriven)
+      this.#captureRequest = this.#armAnimationFrame(this.#onCaptureLoop);
   };
-
-  /** Switch to the VideoFrames fallback when frame callbacks have stalled. */
-  #recoverFrameCallback(now: DOMHighResTimeStamp): void {
-    if (this.#externalHost) return;
-    if (this.#videoFrames.captureDriven) return;
-    // On Firefox, VideoFrames watches painted-frame counters itself and
-    // treats each change as a new picture.
-    if (this.#videoFrames.mozDriven && this.#videoFrames.hasDelivered) return;
-    if (
-      now - this.#lastVideoFrameCallbackAt < FRAME_CALLBACK_TIMEOUT_MS ||
-      this.#video.playbackRate === 0 ||
-      this.#video.paused ||
-      this.#video.ended ||
-      this.#video.readyState < 2
-    )
-      return;
-
-    this.#request();
-    this.#videoFrames.recover();
-  }
 
   /**
    * Put up whichever filtered field belongs on the screen next.
@@ -3037,6 +2995,10 @@ export class Deinterlacer extends EventTarget {
    * the one the first field was taken at.
    */
   #onFlush = (event: Event): void => {
+    if (event.type === "ratechange") {
+      if (this.#videoFrames.captureDriven) this.#startCaptureLoop();
+      else this.#stopCaptureLoop();
+    }
     if (
       (event.type === "pause" ||
         event.type === "ended" ||

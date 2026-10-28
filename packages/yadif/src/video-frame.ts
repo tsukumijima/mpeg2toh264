@@ -18,8 +18,6 @@ export interface FrameMetadata {
   timeOrigin: number;
   /** The frame for this notification, valid only until the callback returns. */
   frame?: VideoFrame;
-  /** RGBA pixels from the same frame, captured while native callbacks are stalled. */
-  pixels?: ImageData;
   /** Firefox counters supply identity and wall-clock cadence, not a frame PTS. */
   mozTiming?: { periodMs: number; discontinuity: boolean };
 }
@@ -89,26 +87,20 @@ export class VideoFrames {
   #callback: FrameCallback | null = null;
   #counters: number[] | null = null;
   #painted: number | null = null;
-  #delivered = false;
   #discontinuity = true;
   #lastAt: number | null = null;
   #sample: { at: number; frames: number } | null = null;
   #periodMs = 0;
   readonly #canCapture: boolean;
   #capture: boolean;
-  #fallback = false;
   #captureTimer: (() => void) | null = null;
   #captureDocument: Document | null = null;
   #nativeHandle: number | null = null;
   #capturedTimestamp: number | null = null;
   #captureCount = 0;
   #captureDeltas: number[] = [];
-  #captureInFlight = false;
-  #captureRevision = 0;
-  #pixelBuffers: Uint8ClampedArray<ArrayBuffer>[] = [];
   #pending: {
     frame: VideoFrame;
-    pixels?: ImageData;
     at: number;
     count: number;
   }[] = [];
@@ -146,19 +138,9 @@ export class VideoFrames {
     }
   }
 
-  /** Whether acquisition runs off the Firefox counters. */
-  get mozDriven(): boolean {
-    return this.#moz !== null && !this.#capture;
-  }
-
   /** Whether acquisition uses the captured pictures' own timestamps. */
   get captureDriven(): boolean {
     return this.#capture;
-  }
-
-  /** Whether any frame has been delivered yet (counters proven live). */
-  get hasDelivered(): boolean {
-    return this.#delivered;
   }
 
   request(callback: FrameCallback): void {
@@ -171,24 +153,6 @@ export class VideoFrames {
     this.#handle = this.#moz
       ? requestAnimationFrame(this.#poll)
       : this.#video.requestVideoFrameCallback(this.#present);
-  }
-
-  /** Recover stalled callbacks through the capture path used for faster playback. */
-  recover(): void {
-    if (this.#callback === null || this.#capture || this.#moz) return;
-    if (this.#handle !== null)
-      this.#video.cancelVideoFrameCallback(this.#handle);
-    this.#handle = null;
-    if (this.#canCapture) {
-      // Re-registering rVFC may not restore notifications after PiP closes in
-      // Chromium. Carry the last timestamp and count into capture, where each
-      // picture is identified by its own VideoFrame timestamp.
-      this.#fallback = true;
-      this.#capture = true;
-      this.#armCapture();
-    } else {
-      this.#handle = this.#video.requestVideoFrameCallback(this.#present);
-    }
   }
 
   cancel(): void {
@@ -206,7 +170,6 @@ export class VideoFrames {
     this.#clearCaptured();
     this.#capturedTimestamp = null;
     this.#captureDeltas = [];
-    this.#fallback = false;
     this.#capture = this.#canCapture && this.#video.playbackRate > 1;
     this.#reset();
   }
@@ -251,28 +214,21 @@ export class VideoFrames {
           expectedDisplayTime: Math.max(captured.at, now),
           timeOrigin: performance.timeOrigin,
           frame,
-          pixels: captured.pixels,
         });
       } finally {
         // The receiver has cloned any frame sent to a Worker, so the original can now be closed.
         frame.close();
-        if (this.#callback !== null && captured.pixels?.data.byteLength)
-          this.#pixelBuffers.push(captured.pixels.data);
       }
     }
   }
 
   #clearCaptured(): void {
-    this.#captureRevision++;
     for (const captured of this.#pending) captured.frame.close();
     this.#pending = [];
-    this.#pixelBuffers = [];
   }
 
   #captureChanged = (event: Event): void => {
-    if (event.type === "emptied") this.#fallback = false;
-    const capture =
-      this.#canCapture && (this.#video.playbackRate > 1 || this.#fallback);
+    const capture = this.#canCapture && this.#video.playbackRate > 1;
     if (capture !== this.#capture) {
       const callback = this.#callback;
       this.cancel();
@@ -297,8 +253,7 @@ export class VideoFrames {
     if (
       !this.#capture ||
       this.#captureTimer !== null ||
-      this.#callback === null ||
-      this.#captureInFlight
+      this.#callback === null
     )
       return;
     if (
@@ -328,26 +283,17 @@ export class VideoFrames {
     }
   }
 
-  #capturePresented = (now: number, metadata: NativeFrameMetadata): void => {
-    // A transient stall can recover without reloading the video. Native
-    // notifications restore compositor timing and direct video uploads.
-    if (this.#fallback && this.#video.playbackRate <= 1) {
-      const callback = this.#callback;
-      this.cancel();
-      this.#callback = callback;
-      this.#present(now, metadata);
-      return;
-    }
+  #capturePresented = (): void => {
     this.#nativeHandle = null;
     this.#captureTimer?.();
     this.#captureTimer = null;
     this.#captureFrame();
   };
 
-  #captureFrame = async (): Promise<void> => {
+  #captureFrame = (): void => {
     this.#captureTimer = null;
     const video = this.#video;
-    if (this.#callback === null || this.#captureInFlight) return;
+    if (this.#callback === null) return;
     if (video.readyState < 2 || video.seeking) {
       this.#armCapture();
       return;
@@ -375,35 +321,6 @@ export class VideoFrames {
     if (frame.timestamp === this.#capturedTimestamp) {
       frame.close();
     } else {
-      let pixels: ImageData | undefined;
-      if (this.#fallback) {
-        // Uploading VideoFrame directly can keep growing GPU memory in
-        // Chromium. Copy RGBA pixels from the same frame so each upload uses
-        // plain pixel data instead of the browser's image conversion path.
-        const revision = this.#captureRevision;
-        const width = frame.visibleRect?.width ?? frame.codedWidth;
-        const height = frame.visibleRect?.height ?? frame.codedHeight;
-        let buffer = this.#pixelBuffers.pop();
-        if (buffer?.byteLength !== width * height * 4)
-          buffer = new Uint8ClampedArray(width * height * 4);
-        this.#captureInFlight = true;
-        try {
-          await frame.copyTo(buffer, { format: "RGBA" });
-          pixels = new ImageData(buffer, width, height);
-        } catch (error) {
-          frame.close();
-          throw error;
-        } finally {
-          this.#captureInFlight = false;
-        }
-        // A seek or stop during readback makes this picture stale. Release it
-        // and resume acquisition against the current playback state.
-        if (revision !== this.#captureRevision || this.#callback === null) {
-          frame.close();
-          this.#armCapture();
-          return;
-        }
-      }
       let steps = 1;
       if (this.#capturedTimestamp !== null) {
         const delta = frame.timestamp - this.#capturedTimestamp;
@@ -414,7 +331,7 @@ export class VideoFrames {
         }
         if (delta > 0 && this.#captureDeltas.length > 0) {
           // Use the previously measured input period to count missing frames
-          // across a long gap while callbacks are stalled.
+          // across a long gap between captures.
           const ordered = [...this.#captureDeltas].sort((a, b) => a - b);
           const period = ordered[Math.floor(ordered.length / 2)]!;
           steps = Math.max(1, Math.round(delta / period));
@@ -429,7 +346,7 @@ export class VideoFrames {
           ? ((frame.timestamp / 1e6 - video.currentTime) * 1000) /
             video.playbackRate
           : 0);
-      this.#pending.push({ frame, pixels, at, count: this.#captureCount });
+      this.#pending.push({ frame, at, count: this.#captureCount });
       // After a long rendering stall, retain the newest frames and signal losses through the counter gap.
       while (this.#pending.length > 4) this.#pending.shift()!.frame.close();
     }
@@ -451,17 +368,6 @@ export class VideoFrames {
 
   /** Native acquisition: pass the report on, with the clock it was made on. */
   #present = (now: number, metadata: NativeFrameMetadata): void => {
-    const timestamp = Math.round(metadata.mediaTime * 1e6);
-    if (this.#capturedTimestamp !== null) {
-      const frames = metadata.presentedFrames - this.#captureCount;
-      const delta = timestamp - this.#capturedTimestamp;
-      if (frames > 0 && delta > 1000 && delta < 250000) {
-        this.#captureDeltas.push(delta / frames);
-        if (this.#captureDeltas.length > 7) this.#captureDeltas.shift();
-      }
-    }
-    this.#capturedTimestamp = timestamp;
-    this.#captureCount = metadata.presentedFrames;
     this.#deliver(now, {
       width: metadata.width,
       height: metadata.height,
@@ -476,7 +382,6 @@ export class VideoFrames {
     const callback = this.#callback;
     this.#handle = null;
     this.#callback = null;
-    this.#delivered = true;
     callback?.(now, metadata);
   };
 

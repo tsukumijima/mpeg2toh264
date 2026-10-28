@@ -64,7 +64,6 @@ export type WorkerCommand =
       type: "frame";
       id: number;
       frame: VideoFrame;
-      pixels?: ImageData;
       metadata: WorkerFrameObservation;
       video: WorkerVideoState;
     }

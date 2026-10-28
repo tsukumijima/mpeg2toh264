@@ -1,5 +1,5 @@
 // Owner callbacks run synchronously. A recovery must not outlive the stop or
-// destruction requested by that callback, including in the frame watchdog.
+// destruction requested by that callback.
 import assert from "node:assert/strict";
 import { buildBundles, run } from "./yadif-clock-harness.mjs";
 
@@ -13,7 +13,6 @@ for (const listener of ["event", "callback"])
       "scan",
       "timeline",
       "resize",
-      "watchdog",
     ]) {
       const label = `${listener}/${action}/${trigger}`;
       let control;
@@ -53,11 +52,6 @@ for (const listener of ["event", "callback"])
         },
         beforeVsync(n, current) {
           control = current;
-          if (trigger === "watchdog" && n > 65 && n % 2 === 0) {
-            current.video.currentTime += 1 / 30;
-            current.video.pictureTime = current.video.currentTime;
-            current.video.totalVideoFrames++;
-          }
           if (n === 0 && listener === "event") {
             current.pageContext.__onFailure = onFailure;
             current.deinterlacer(
@@ -67,10 +61,9 @@ for (const listener of ["event", "callback"])
           if (n === 12) current.deinterlacer("__deinterlacer.film = true");
           if (n !== 65) return;
           armed = true;
-          if (trigger === "watchdog") current.frames(false);
           if (trigger === "setter")
             current.deinterlacer("__deinterlacer.film = true");
-          if (trigger === "start" || trigger === "watchdog")
+          if (trigger === "start")
             current.deinterlacer(
               "__deinterlacer.stop(); __deinterlacer.start()",
             );

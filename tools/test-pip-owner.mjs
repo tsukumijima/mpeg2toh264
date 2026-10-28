@@ -1,7 +1,7 @@
 /**
- * The loop and the watchdog belong to the window that composites the canvas.
+ * The drawing loop belongs to the window that composites the canvas.
  *
- * Both were scheduled on the bare global `requestAnimationFrame`, which is the
+ * It was scheduled on the bare global `requestAnimationFrame`, which is the
  * window this module was loaded in -- the opener. A document
  * picture-in-picture window can adopt the element and its canvas while
  * playback runs, and from then on it is that window that composites them. The
@@ -151,40 +151,13 @@ test("an abandoned window keeps nothing, and is what cancels it", async ({
   );
   for (const view of ["pipA", "pipB"])
     assert.ok(perView[view] > 0, `nothing was ever scheduled on ${view}`);
-  // Two at most anywhere: the loop and the watchdog, never a duplicate pair
-  // left behind by a re-arm that forgot to cancel.
+  // Only one drawing request, with none left behind by a re-arm that forgot to cancel.
   for (const [vsync, snapshot] of live)
     for (const [view, handles] of Object.entries(snapshot))
       assert.ok(
-        handles.length <= 2,
+        handles.length <= 1,
         `refresh ${vsync}: ${handles.length} requests outstanding on ${view}`,
       );
-});
-
-test("the watchdog follows even when the Worker owns the drawing", async ({
-  fixed,
-}) => {
-  // Worker rendering keeps its own animation frames, so the schedule says
-  // nothing here. What moves is the page-side watchdog, and the ledger is
-  // where that shows.
-  const result = await run(fixed, {
-    vsyncs: VSYNCS,
-    rendering: "worker",
-    beforeVsync: LIFECYCLE,
-  });
-  const { perView, stranded } = ledger(result);
-  for (const view of ["pipA", "pipB"])
-    assert.ok(
-      perView[view] > 0,
-      `the watchdog never moved to ${view} (${JSON.stringify(perView)})`,
-    );
-  assert.deepEqual(
-    stranded
-      .filter(([view]) => view !== "worker" && view !== "pipB")
-      .map(([view]) => view),
-    [],
-    "a page-side request was left on a window that is no longer the owner",
-  );
 });
 
 test("adoption is noticed with no frame and no layout to report it", async ({
@@ -284,56 +257,6 @@ for (const rendering of ["main", "worker"]) {
     );
     assert.equal(result.failures.length, 0, result.failures[0]?.message);
   });
-
-  test(`${rendering} resumes after visibility precedes adoption and native callbacks stop`, async ({
-    fixed,
-  }) => {
-    const result = await run(fixed, {
-      vsyncs: VSYNCS,
-      rendering,
-      beforeVsync(vsync, control) {
-        if (vsync === 60) {
-          control.adopt("pipA", PIP_A_ORIGIN);
-          control.suspend("page");
-        }
-        if (vsync === 118) control.frames(false);
-        if (vsync >= 118) {
-          control.video.currentTime = (vsync * REFRESH_MS) / 1000;
-          control.video.pictureTime =
-            (Math.floor(vsync / 2) * 2 * REFRESH_MS) / 1000;
-          control.video.totalVideoFrames = Math.floor(vsync / 2) + 1;
-        }
-        if (vsync === 120) {
-          // Reproduce the PiP close order with neither a resize nor a frame
-          // callback available to discover the move.
-          control.suspend("pipA");
-          control.views.get("pipA").closed = true;
-          control.resume("page");
-          control.adopt("page");
-        }
-      },
-    });
-    const decisions = presentations(result.draws);
-    assert.ok(
-      decisions.filter((entry) => entry.refresh > 140).length > 90,
-      "pictures stopped being presented after the PiP window closed",
-    );
-    assert.deepEqual(
-      ledger(result)
-        .stranded.filter(([view]) => view !== "worker")
-        .map(([view]) => view),
-      ["page"],
-      "animation requests remained on the closed window",
-    );
-    assert.equal(result.failures.length, 0, result.failures[0]?.message);
-    result.control.deinterlacer("__deinterlacer.destroy()");
-    for (const view of result.control.views.values())
-      assert.equal(
-        view.document.observers.size,
-        0,
-        "destroy left a DOM observer attached",
-      );
-  });
 }
 
 test("stopping and destroying leave nothing armed anywhere", async ({
@@ -346,7 +269,7 @@ test("stopping and destroying leave nothing armed anywhere", async ({
       LIFECYCLE(vsync, control);
       if (vsync === 200) {
         control.deinterlacer("__deinterlacer.stop()");
-        // A stopped deinterlacer has cancelled both requests; nothing may be
+        // A stopped deinterlacer has cancelled its request; nothing may be
         // left on the window that was serving them a refresh ago.
         assert.deepEqual(
           Object.entries(control.outstanding()).filter(
@@ -451,18 +374,6 @@ test("the fault this fixes is present without it", async ({ baseline }) => {
     stranded.map(([view]) => view),
     ["page"],
     "the baseline should leave its requests on the opener",
-  );
-  // Worker rendering hides it in the schedule, but the watchdog is stranded
-  // just the same, so the frame-callback recovery is dead after the move.
-  const worker = await run(baseline, {
-    vsyncs: VSYNCS,
-    rendering: "worker",
-    beforeVsync: LIFECYCLE,
-  });
-  assert.equal(
-    ledger(worker).perView.pipA,
-    undefined,
-    "the baseline should never schedule on the adopting window",
   );
   return null;
 });
