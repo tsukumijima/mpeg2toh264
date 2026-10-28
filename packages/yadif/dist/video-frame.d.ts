@@ -18,8 +18,6 @@ export interface FrameMetadata {
     timeOrigin: number;
     /** The frame for this notification, valid only until the callback returns. */
     frame?: VideoFrame;
-    /** RGBA pixels from the same frame, captured while native callbacks are stalled. */
-    pixels?: ImageData;
     /** Firefox counters supply identity and wall-clock cadence, not a frame PTS. */
     mozTiming?: {
         periodMs: number;
@@ -40,15 +38,9 @@ export declare function supportsVideoFrames(): boolean;
 export declare class VideoFrames {
     #private;
     constructor(video: HTMLVideoElement, takeFrame?: () => VideoFrame | null | undefined);
-    /** Whether acquisition runs off the Firefox counters. */
-    get mozDriven(): boolean;
     /** Whether acquisition uses the captured pictures' own timestamps. */
     get captureDriven(): boolean;
-    /** Whether any frame has been delivered yet (counters proven live). */
-    get hasDelivered(): boolean;
     request(callback: FrameCallback): void;
-    /** Recover stalled callbacks through the capture path used for faster playback. */
-    recover(): void;
     cancel(): void;
     destroy(): void;
     /** Deliver pending input on the rendering window's refresh, before drawing. */
