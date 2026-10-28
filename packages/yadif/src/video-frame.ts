@@ -295,6 +295,7 @@ export class VideoFrames {
 
   #armCapture(): void {
     if (
+      !this.#capture ||
       this.#captureTimer !== null ||
       this.#callback === null ||
       this.#captureInFlight
@@ -327,7 +328,16 @@ export class VideoFrames {
     }
   }
 
-  #capturePresented = (): void => {
+  #capturePresented = (now: number, metadata: NativeFrameMetadata): void => {
+    // A transient stall can recover without reloading the video. Native
+    // notifications restore compositor timing and direct video uploads.
+    if (this.#fallback && this.#video.playbackRate <= 1) {
+      const callback = this.#callback;
+      this.cancel();
+      this.#callback = callback;
+      this.#present(now, metadata);
+      return;
+    }
     this.#nativeHandle = null;
     this.#captureTimer?.();
     this.#captureTimer = null;

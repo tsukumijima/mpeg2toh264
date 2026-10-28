@@ -2443,6 +2443,7 @@ export class Deinterlacer extends EventTarget {
     if (this.#videoFrames.mozDriven && this.#videoFrames.hasDelivered) return;
     if (
       now - this.#lastVideoFrameCallbackAt < FRAME_CALLBACK_TIMEOUT_MS ||
+      this.#video.playbackRate === 0 ||
       this.#video.paused ||
       this.#video.ended ||
       this.#video.readyState < 2
